@@ -342,5 +342,14 @@ void main() {
       expect(page, contains("core.dss.addDataSource({ url: './dss' })"));
       expect(page, isNot(contains("url: './dss/'")));
     });
+    test('the Frame panel probes the cache and status, and keeps its message', () {
+      // No harness runs index.html; this string guard keeps a future edit
+      // from silently dropping the two-step probe or the hint.
+      final page = File('assets/stellarium/index.html').readAsStringSync();
+      expect(page, contains("fetch('./dss/properties', { method: 'HEAD'"));
+      expect(page, contains("fetch('./dss/status'"));
+      expect(page, contains('No sky photos yet — connect to the Internet once'));
+      expect(page, contains('if (frameOn) probeDssPhotos();'));
+    });
   });
 }

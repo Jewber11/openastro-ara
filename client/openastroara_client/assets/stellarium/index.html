@@ -1247,15 +1247,21 @@ function probeDssPhotos() {
   if (!el) return;
   // Two-step: no manifest cached and none fetchable → blank for sure; manifest
   // present (cached on the first online zoom) → ask the server whether its last
-  // upstream fetch failed, which is the dark-site case with a warm cache.
-  fetch('./dss/properties', { method: 'HEAD', cache: 'no-store' })
-    .then(function (r) {
-      if (!r.ok) { el.hidden = false; return; }
-      return fetch('./dss/status', { cache: 'no-store' })
-        .then(function (s) { return s.json(); })
-        .then(function (st) { el.hidden = !st.offline; });
-    })
-    .catch(function () { el.hidden = false; });
+  // upstream fetch failed, which is the dark-site case with a warm cache. The
+  // status is read again a few seconds later: right after launch the engine may
+  // not have missed its first tile yet, so the first read can still say online.
+  function probe() {
+    fetch('./dss/properties', { method: 'HEAD', cache: 'no-store' })
+      .then(function (r) {
+        if (!r.ok) { el.hidden = false; return; }
+        return fetch('./dss/status', { cache: 'no-store' })
+          .then(function (s) { return s.json(); })
+          .then(function (st) { el.hidden = !st.offline; });
+      })
+      .catch(function () { el.hidden = false; });
+  }
+  probe();
+  setTimeout(function () { if (frameOn) probe(); }, 4000);
   el.textContent = 'No sky photos yet — connect to the Internet once; the areas you view are kept for offline use.';
 }
 

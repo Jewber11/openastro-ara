@@ -45,7 +45,11 @@ class StellariumServer {
   /// Where DSS2 tiles are cached (exposed so a test can seed a hit).
   @visibleForTesting
   Directory get dssCacheDir => _dssCacheDir;
-  final HttpClient _dssClient = HttpClient();
+  // connectionTimeout, not `.getUrl().timeout()`: the latter abandons only the
+  // wait, so a connect+TLS that finishes a moment later leaves an unclosed
+  // HttpClientRequest in the client's active set for the app's life.
+  final HttpClient _dssClient = HttpClient()
+    ..connectionTimeout = const Duration(seconds: 5);
   final Map<String, Future<Uint8List?>> _dssFetches = {};
   DateTime? _dssRetryAfter;
   DateTime? _dssLastFailure;
@@ -406,14 +410,12 @@ class StellariumServer {
       return;
     }
     // Page → "is the photo backdrop expected to be blank?" (see [_dssOffline]).
+    // (Shadows an upstream resource literally named `status`; HiPS has none.)
     if (path == '${_dssPathPrefix}status') {
       response.headers.contentType =
           ContentType('application', 'json', charset: 'utf-8');
       response.headers.set(HttpHeaders.cacheControlHeader, 'no-store');
-      response.write(jsonEncode({
-        'offline': _dssOffline,
-        'cached': await File('${_dssCacheDir.path}/properties').exists(),
-      }));
+      response.write(jsonEncode({'offline': _dssOffline}));
       await response.close();
       return;
     }
@@ -484,7 +486,7 @@ class StellariumServer {
     HttpClientRequest? req;
     final Uint8List bytes;
     try {
-      req = await _dssClient.getUrl(uri).timeout(const Duration(seconds: 5));
+      req = await _dssClient.getUrl(uri);
       req.headers.set(HttpHeaders.userAgentHeader, 'OpenAstroAra DSS cache');
       final upstream = await req.close().timeout(const Duration(seconds: 10));
       if (upstream.statusCode != HttpStatus.ok) {

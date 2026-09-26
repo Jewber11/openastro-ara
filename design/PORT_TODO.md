@@ -1989,6 +1989,7 @@ Three out-of-scope items from #1017's review rounds, none widened into that PR:
 
 - The client's `stellarium-dss2` cache is append-only: nothing evicts it and `docs/RUNNING.md`
   does not say how to prune it. A night of zooming across the sky at Norder 7-8 is tens of MB;
-  months of it is GB. Add a size cap with LRU eviction (or at least a "Clean sky photo cache"
+  months of it is GB, and the route is deliberately token-less (the WASM loader cannot set
+  `x-ara-token`), so any local process can grow it too. Add a size cap with LRU eviction (or at least a "Clean sky photo cache"
   button next to the §65.4 preview-cache one in the Storage panel) and document the folder.
   Review note on #991.
