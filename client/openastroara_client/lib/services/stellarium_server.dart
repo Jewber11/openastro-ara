@@ -531,6 +531,9 @@ class StellariumServer {
       // offline, which for the user it is — the Frame hint then says so.
       if (upstream.statusCode != HttpStatus.ok ||
           !_isDssMediaType(relative, upstream.headers.contentType)) {
+        // Drain first: the response is complete, so abort() below is a no-op
+        // and an unread body would pin the socket until the client closes.
+        await upstream.drain<void>().timeout(_dssBodyTimeout);
         throw HttpException(
           'upstream answered ${upstream.statusCode} '
           '${upstream.headers.contentType?.mimeType ?? "(no content type)"} '

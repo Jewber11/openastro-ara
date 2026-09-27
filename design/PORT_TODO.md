@@ -1992,7 +1992,10 @@ Three out-of-scope items from #1017's review rounds, none widened into that PR:
   months of it is GB, and the route is deliberately token-less (the WASM loader cannot set
   `x-ara-token`), so any local process can grow it too. Add a size cap with LRU eviction (or at least a "Clean sky photo cache"
   button next to the §65.4 preview-cache one in the Storage panel) and document the folder.
-  Review note on #991.
+  Two leftovers fold into the same sweep: an orphaned `.part-<micros>` file stays behind when the
+  rename fails (Windows, target exists) or the app is killed mid-write, and nothing sweeps them;
+  and the engine's `Allsky.jpg?v=<release_date>` cache-buster is dropped from the cache key, so a
+  survey re-release would keep serving the old allsky. Review notes on #991.
 - `/dss` tile fetches share the page's per-origin connection pool with the control channels
   (`/aracmd` polled every ~350 ms, `/araevent`), and a miss can hold its request for up to
   10 s (headers) + 30 s (body). On a slow-but-alive uplink the browser's ~6 sockets per host
