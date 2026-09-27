@@ -516,8 +516,12 @@ void main() {
     });
     test('the Frame panel probes the cache and status, and keeps its message', () {
       // No harness runs index.html; this string guard keeps a future edit
-      // from silently dropping the two-step probe or the hint.
-      final page = File('assets/stellarium/index.html').readAsStringSync();
+      // from silently dropping the two-step probe or the hint. Line endings
+      // are normalised: a Windows checkout has CRLF and the multi-line guard
+      // below is written with LF.
+      final page = File('assets/stellarium/index.html')
+          .readAsStringSync()
+          .replaceAll('\r\n', '\n');
       expect(page, contains("fetch('./dss/properties', { method: 'HEAD'"));
       expect(page, contains("fetch('./dss/status'"));
       expect(page, contains("Some sky photos for this area aren't cached yet"));
