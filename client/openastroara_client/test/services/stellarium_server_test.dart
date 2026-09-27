@@ -312,6 +312,8 @@ void main() {
     final tile = Uint8List.fromList([0xFF, 0xD8, 1, 2, 3, 0xFF, 0xD9]);
     final savedOrigin = StellariumServer.dssOrigin;
     final savedCap = StellariumServer.maxDssResourceBytes;
+    final savedBodyTimeout = StellariumServer.dssBodyTimeout;
+    final stalled = <HttpResponse>[];
 
     setUpAll(() async {
       origin = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
@@ -327,6 +329,15 @@ void main() {
           // the cap is never exercised.
           req.response.headers.contentType = ContentType('image', 'jpeg');
           req.response.add(List<int>.filled(64, 7));
+        } else if (path == '/Norder3/Dir0/Npix12.jpg') {
+          // 404 headers, then the link drops: the body never comes and the
+          // connection is never closed (half-open TCP after a hotspot switch).
+          req.response.statusCode = HttpStatus.notFound;
+          req.response.contentLength = 10;
+          req.response.add([0]); // one byte forces the headers onto the wire
+          await req.response.flush();
+          stalled.add(req.response);
+          return;
         } else {
           req.response.statusCode = HttpStatus.notFound;
         }
@@ -334,12 +345,19 @@ void main() {
       });
       StellariumServer.dssOrigin = Uri.parse('http://127.0.0.1:${origin.port}/');
       StellariumServer.maxDssResourceBytes = 32;
+      StellariumServer.dssBodyTimeout = const Duration(seconds: 1);
       server = await StellariumServer.start();
     });
     tearDownAll(() async {
       StellariumServer.dssOrigin = savedOrigin;
       StellariumServer.maxDssResourceBytes = savedCap;
+      StellariumServer.dssBodyTimeout = savedBodyTimeout;
       await server.dispose();
+      for (final r in stalled) {
+        try {
+          await r.close();
+        } catch (_) {/* peer already gone */}
+      }
       await origin.close(force: true);
     });
     // Each test starts with no backoff armed and no offline flag: a refusal
@@ -378,6 +396,15 @@ void main() {
       expect((await get('/dss/Norder3/Dir0/Npix9.jpg')).status, HttpStatus.notFound);
       expect(File('${server.dssCacheDir.path}/Norder3/Dir0/Npix9.jpg').existsSync(), isFalse);
       expect((await status())['offline'], false);
+    });
+
+    test('a 404 whose body never arrives is bounded like every other read',
+        () async {
+      // The coalesced fetch must complete (404 to the page, entry released)
+      // within the body deadline, not hang for the app's life.
+      final res = await get('/dss/Norder3/Dir0/Npix12.jpg')
+          .timeout(const Duration(seconds: 4));
+      expect(res.status, HttpStatus.notFound);
     });
 
     test('a body over the cap is refused and not persisted', () async {
@@ -495,8 +522,13 @@ void main() {
       expect(page, contains("fetch('./dss/status'"));
       expect(page, contains("Some sky photos for this area aren't cached yet"));
       expect(page, contains('if (frameOn) probeDssPhotos();'));
-      // No hint about photos for a layer the user turned off.
-      expect(page, contains("if (stel && !dispState('dss')) { el.hidden = true; return; }"));
+      // No hint (and no request) for a layer the user turned off — checked
+      // inside probe(), so the 4 s re-probe cannot bypass it.
+      expect(page, contains("function probe() {\n"
+          "    // Photos the user switched off are not \"missing\": say nothing for them,\n"
+          "    // and send no request. Inside probe() so the delayed re-probe obeys too.\n"
+          "    if (stel && !dispState('dss')) { el.hidden = true; return; }\n"
+          "    fetch('./dss/properties'"));
     });
   });
 }

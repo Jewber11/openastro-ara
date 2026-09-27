@@ -96,7 +96,8 @@ class StellariumServer {
   /// Deadline for the whole upstream body once headers are in: a stalled TCP
   /// body (captive-portal hotspot) must not pin the page's fetch, the
   /// coalescing map entry and the socket until the OS gives up.
-  static const _dssBodyTimeout = Duration(seconds: 30);
+  @visibleForTesting
+  static Duration dssBodyTimeout = const Duration(seconds: 30);
   static final RegExp _dssSegment = RegExp(r'^[A-Za-z0-9._-]+$');
 
   static const String _tokenHeader = 'x-ara-token';
@@ -520,7 +521,10 @@ class StellariumServer {
       if (upstream.statusCode == HttpStatus.notFound) {
         // A 404 is the survey's own answer (a tile outside its coverage), not
         // a connectivity failure — no backoff, and it counts as "online".
-        await upstream.drain<void>();
+        // Bounded like every other read: a 404 whose body stalls (half-open
+        // TCP after a hotspot switch) must not pin the coalesced fetch and the
+        // page's socket for the app's life.
+        await upstream.drain<void>().timeout(dssBodyTimeout);
         _dssLastSuccess = DateTime.now();
         return null;
       }
@@ -533,7 +537,7 @@ class StellariumServer {
           !_isDssMediaType(relative, upstream.headers.contentType)) {
         // Drain first: the response is complete, so abort() below is a no-op
         // and an unread body would pin the socket until the client closes.
-        await upstream.drain<void>().timeout(_dssBodyTimeout);
+        await upstream.drain<void>().timeout(dssBodyTimeout);
         throw HttpException(
           'upstream answered ${upstream.statusCode} '
           '${upstream.headers.contentType?.mimeType ?? "(no content type)"} '
@@ -541,7 +545,7 @@ class StellariumServer {
           uri: uri,
         );
       }
-      final body = await _readCapped(upstream).timeout(_dssBodyTimeout);
+      final body = await _readCapped(upstream).timeout(dssBodyTimeout);
       if (body == null) {
         // Over the cap: refuse, don't persist, and don't leave the rest of the
         // body streaming into nowhere. Neither a success nor an outage.
