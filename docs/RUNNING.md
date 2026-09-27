@@ -181,8 +181,11 @@ flutter build linux --release   # ships from build/linux/x64/release/bundle/
   stars/atmosphere — a blank/black sky means a WebGL2 gap in your WebKitGTK build.
 - **Framing photographs:** DSS2 target imagery is fetched through the local
   Stellarium server and cached under the platform application-support directory
-  (`stellarium-dss2`; on Linux, usually
-  `~/.local/share/org.openastro.openastroara/stellarium-dss2`). Open Planning,
+  (`stellarium-dss2`; on Linux
+  `~/.local/share/org.openastro.openastroara/stellarium-dss2`, unless the older
+  executable-name directory `~/.local/share/openastroara` already exists, e.g.
+  beside a dev daemon profile: `path_provider_linux` then keeps using that one,
+  so the cache lands at `~/.local/share/openastroara/stellarium-dss2`). Open Planning,
   select a target, and zoom while online; those requested HiPS tiles then remain
   available when the computer joins the SBC-only hotspot. The frame outline,
   coordinates, and vector objects always work offline. A tile never viewed

@@ -1993,3 +1993,10 @@ Three out-of-scope items from #1017's review rounds, none widened into that PR:
   `x-ara-token`), so any local process can grow it too. Add a size cap with LRU eviction (or at least a "Clean sky photo cache"
   button next to the §65.4 preview-cache one in the Storage panel) and document the folder.
   Review note on #991.
+- `/dss` tile fetches share the page's per-origin connection pool with the control channels
+  (`/aracmd` polled every ~350 ms, `/araevent`), and a miss can hold its request for up to
+  10 s (headers) + 30 s (body). On a slow-but-alive uplink the browser's ~6 sockets per host
+  can all be parked on pending tile misses, delaying Flutter -> page `goto`/search commands
+  by seconds; pre-#991 the tiles went to `alasky.u-strasbg.fr` on their own pool. Consider
+  `_dssClient.maxConnectionsPerHost` plus a shorter first-byte deadline, or answer a miss
+  with 404 immediately and fetch in the background. Review note on #991.

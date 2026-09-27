@@ -249,6 +249,45 @@ void main() {
       expect((await send('POST', '/dss/properties')).status,
           HttpStatus.methodNotAllowed);
     });
+
+    // The DNS-rebind guard: a page at http://evil.example resolving to
+    // 127.0.0.1 still sends its own hostname in Host. Connect to the loopback
+    // address and forge the header, so no name resolution is involved.
+    test('refuses a Host that is not our own loopback origin', () async {
+      final port = Uri.parse(server.baseUrl).port;
+      Future<int> withHost(String host) async {
+        final client = HttpClient();
+        try {
+          final req = await client.getUrl(Uri.parse('${server.baseUrl}/dss/properties'));
+          req.headers.set(HttpHeaders.hostHeader, host);
+          final res = await req.close();
+          await res.drain<void>();
+          return res.statusCode;
+        } finally {
+          client.close(force: true);
+        }
+      }
+      expect(await withHost('localhost:$port'), HttpStatus.forbidden);
+      expect(await withHost('evil.example:$port'), HttpStatus.forbidden);
+      expect(await withHost('127.0.0.1:1'), HttpStatus.forbidden);
+      // Sanity: the real origin is let through to the cache lookup (a miss
+      // here is a 404 or, offline, still not a 403).
+      expect(await withHost('127.0.0.1:$port'), isNot(HttpStatus.forbidden));
+    });
+  });
+
+  group('StellariumServer dispose', () {
+    test('removes the temp-fallback tile cache it created', () async {
+      // Under `flutter test` the path provider is not available, so start()
+      // falls back to a private mkdtemp directory; it must not outlive the
+      // server (one per run/test group would pile up in the system temp).
+      final server = await StellariumServer.start();
+      final dir = server.dssCacheDir;
+      expect(dir.existsSync(), isTrue);
+      expect(dir.path, contains('openastroara-dss2-'));
+      await server.dispose();
+      expect(dir.existsSync(), isFalse);
+    });
   });
 
   // The download/persist half against a local stub origin: what lands on
@@ -431,7 +470,7 @@ void main() {
       final page = File('assets/stellarium/index.html').readAsStringSync();
       expect(page, contains("fetch('./dss/properties', { method: 'HEAD'"));
       expect(page, contains("fetch('./dss/status'"));
-      expect(page, contains('No sky photos yet — connect to the Internet once'));
+      expect(page, contains("Some sky photos for this area aren't cached yet"));
       expect(page, contains('if (frameOn) probeDssPhotos();'));
     });
   });

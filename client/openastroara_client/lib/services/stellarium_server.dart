@@ -22,7 +22,13 @@ import 'package:path_provider/path_provider.dart';
 /// One server is started per app run (lazily, on first [start]) and bound to an
 /// ephemeral loopback port. Call [dispose] to stop it.
 class StellariumServer {
-  StellariumServer._(this._server, this.baseUrl, this.token, this._dssCacheDir);
+  StellariumServer._(
+    this._server,
+    this.baseUrl,
+    this.token,
+    this._dssCacheDir,
+    this._dssCacheIsTemp,
+  );
 
   final HttpServer _server;
 
@@ -41,6 +47,11 @@ class StellariumServer {
   /// loopback server instead of CDS directly, so tiles downloaded while online
   /// remain available when the computer later joins the SBC-only hotspot.
   final Directory _dssCacheDir;
+
+  /// True when [_dssCacheDir] is the private mkdtemp fallback rather than the
+  /// app-support cache; [dispose] removes it so headless hosts and test runs
+  /// do not leave one directory per server behind in the system temp.
+  final bool _dssCacheIsTemp;
 
   /// Where DSS2 tiles are cached (exposed so a test can seed a hit).
   @visibleForTesting
@@ -149,29 +160,32 @@ class StellariumServer {
     // Port 0 → the OS picks a free ephemeral port; loopback-only so nothing off
     // this machine can reach the engine/data.
     final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
-    final dssCacheDir = await _createDssCacheDir();
+    final (dssCacheDir, dssCacheIsTemp) = await _createDssCacheDir();
     final instance = StellariumServer._(
       server,
       'http://127.0.0.1:${server.port}',
       _mintToken(),
       dssCacheDir,
+      dssCacheIsTemp,
     );
     unawaited(instance._serve());
     return instance;
   }
 
-  static Future<Directory> _createDssCacheDir() async {
+  /// The cache directory, and whether it is the temp fallback (see
+  /// [_dssCacheIsTemp]).
+  static Future<(Directory, bool)> _createDssCacheDir() async {
     try {
       final support = await getApplicationSupportDirectory();
       final dir = Directory('${support.path}/stellarium-dss2');
       await dir.create(recursive: true);
-      return dir;
+      return (dir, false);
     } catch (_) {
       // Keep the planetarium usable in a test/headless host where the path
       // provider plugin is unavailable. A fresh private (mkdtemp, 0700) dir per
       // run — never a fixed shared path another user could pre-create or
       // symlink on a multi-user host. Nothing here touches the SBC.
-      return Directory.systemTemp.createTemp('openastroara-dss2-');
+      return (await Directory.systemTemp.createTemp('openastroara-dss2-'), true);
     }
   }
 
@@ -666,5 +680,10 @@ class StellariumServer {
     _dssClient.close(force: true);
     await _server.close(force: true);
     if (identical(await _instance, this)) _instance = null;
+    if (_dssCacheIsTemp) {
+      try {
+        await _dssCacheDir.delete(recursive: true);
+      } catch (_) {/* already gone, or a straggling write: leave it */}
+    }
   }
 }

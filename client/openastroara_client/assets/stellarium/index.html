@@ -1262,7 +1262,9 @@ function probeDssPhotos() {
   }
   probe();
   setTimeout(function () { if (frameOn) probe(); }, 4000);
-  el.textContent = 'No sky photos yet — connect to the Internet once; the areas you view are kept for offline use.';
+  // "Some": the offline flag is sticky until the next upstream success, so
+  // cached tiles may well be painting while this shows.
+  el.textContent = "Some sky photos for this area aren't cached yet — connect to the Internet once; the areas you view are kept for offline use.";
 }
 
 function toggleFrame(on) {
