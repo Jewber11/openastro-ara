@@ -2000,3 +2000,7 @@ Three out-of-scope items from #1017's review rounds, none widened into that PR:
   by seconds; pre-#991 the tiles went to `alasky.u-strasbg.fr` on their own pool. Consider
   `_dssClient.maxConnectionsPerHost` plus a shorter first-byte deadline, or answer a miss
   with 404 immediately and fetch in the background. Review note on #991.
+- The `/dss` route is token-less because the engine's WASM loader cannot set `x-ara-token`, so the
+  loopback-Host gate is its only guard and any local process can drive the cache (fill the disk).
+  A per-run secret could go in the *path* instead: `core.dss.addDataSource({ url: './dss-' + TOKEN })`
+  with the prefix checked server-side closes that gap without a header. Review note on #991.

@@ -35,6 +35,9 @@ void main() {
     });
     test('serves the DSS2 properties manifest as text', () {
       expect(StellariumServer.contentTypeFor('/dss/properties').mimeType, 'text/plain');
+      // The same rule now types the bundled skydata manifests (previously
+      // application/octet-stream); the engine reads them as bytes either way.
+      expect(StellariumServer.contentTypeFor('/skydata/stars/properties').mimeType, 'text/plain');
     });
     test('unknown / binary sky-data blobs fall back to octet-stream', () {
       expect(StellariumServer.contentTypeFor('/skydata/dso/Norder0/Dir0/Npix0.eph').mimeType,
@@ -188,10 +191,20 @@ void main() {
   // black-box tested over loopback. (A miss would fetch from CDS — not here.)
   group('StellariumServer /dss', () {
     late StellariumServer server;
+    final savedOrigin = StellariumServer.dssOrigin;
     setUpAll(() async {
+      // A miss in this group must not reach the real CDS: point upstream at a
+      // port nothing listens on, so a fetch fails fast and deterministically.
+      final dead = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+      final deadPort = dead.port;
+      await dead.close();
+      StellariumServer.dssOrigin = Uri.parse('http://127.0.0.1:$deadPort/');
       server = await StellariumServer.start();
     });
-    tearDownAll(() async => server.dispose());
+    tearDownAll(() async {
+      StellariumServer.dssOrigin = savedOrigin;
+      await server.dispose();
+    });
 
     // Read the body BEFORE the client is closed: a force-close in `finally`
     // with the body still in flight is a race the Windows runner loses
@@ -270,9 +283,9 @@ void main() {
       expect(await withHost('localhost:$port'), HttpStatus.forbidden);
       expect(await withHost('evil.example:$port'), HttpStatus.forbidden);
       expect(await withHost('127.0.0.1:1'), HttpStatus.forbidden);
-      // Sanity: the real origin is let through to the cache lookup (a miss
-      // here is a 404 or, offline, still not a 403).
-      expect(await withHost('127.0.0.1:$port'), isNot(HttpStatus.forbidden));
+      // Sanity: our own origin is let through to the cache lookup; the miss
+      // against the dead upstream is a 404, never a 403.
+      expect(await withHost('127.0.0.1:$port'), HttpStatus.notFound);
     });
   });
 
@@ -482,6 +495,8 @@ void main() {
       expect(page, contains("fetch('./dss/status'"));
       expect(page, contains("Some sky photos for this area aren't cached yet"));
       expect(page, contains('if (frameOn) probeDssPhotos();'));
+      // No hint about photos for a layer the user turned off.
+      expect(page, contains("if (stel && !dispState('dss')) { el.hidden = true; return; }"));
     });
   });
 }
