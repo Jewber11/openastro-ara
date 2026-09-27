@@ -309,7 +309,11 @@ void main() {
           req.response.headers.contentType = ContentType('image', 'jpeg');
           req.response.add(tile);
         } else if (path == '/Norder3/Dir0/Npix8.jpg') {
-          req.response.add(List<int>.filled(64, 7)); // over the test cap
+          // Over the test cap. Typed as an image so the media-type gate lets
+          // the body reach _readCapped; untyped, the gate refuses it first and
+          // the cap is never exercised.
+          req.response.headers.contentType = ContentType('image', 'jpeg');
+          req.response.add(List<int>.filled(64, 7));
         } else {
           req.response.statusCode = HttpStatus.notFound;
         }
@@ -325,6 +329,9 @@ void main() {
       await server.dispose();
       await origin.close(force: true);
     });
+    // Each test starts with no backoff armed and no offline flag: a refusal
+    // in one test must not let the next one pass without contacting the origin.
+    setUp(() => server.resetDssState());
 
     Future<({int status, List<int> body})> get(String path) async {
       final client = HttpClient();
@@ -371,6 +378,7 @@ void main() {
       await dead.close(); // nothing listens here now → connection refused
       StellariumServer.dssOrigin = Uri.parse('http://127.0.0.1:$deadPort/');
       try {
+        expect((await status())['offline'], false, reason: 'fresh state per test');
         expect((await get('/dss/Norder4/Dir0/Npix1.jpg')).status, HttpStatus.notFound);
         expect((await status())['offline'], true);
         // Within the backoff window a further miss is answered from the cache
@@ -425,6 +433,7 @@ void main() {
       await server.dispose();
       await origin.close(force: true);
     });
+    setUp(() => server.resetDssState());
 
     Future<({int status, List<int> body})> get(String path) async {
       final client = HttpClient();
@@ -446,13 +455,14 @@ void main() {
     });
 
     test('a 200 whose body is not an image is refused and not persisted', () async {
-      // The portal test above armed the backoff; this must not depend on it.
-      // Nothing was cached, so a hit is impossible either way — the assertion
-      // that matters is the file never appearing, whichever path answered.
+      expect((await status())['offline'], false, reason: 'fresh state per test');
       expect((await get('/dss/Norder3/Dir0/Npix21.jpg')).status, HttpStatus.notFound);
       expect(File('${server.dssCacheDir.path}/Norder3/Dir0/Npix21.jpg').existsSync(), isFalse);
+      expect((await status())['offline'], true);
+      server.resetDssState();
       expect((await get('/dss/properties')).status, HttpStatus.notFound);
       expect(File('${server.dssCacheDir.path}/properties').existsSync(), isFalse);
+      expect((await status())['offline'], true);
     });
   });
 

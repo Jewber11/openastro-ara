@@ -73,6 +73,16 @@ class StellariumServer {
       _dssLastFailure != null &&
       (_dssLastSuccess == null || _dssLastFailure!.isAfter(_dssLastSuccess!));
 
+  /// Forget the upstream outcome history (backoff, offline flag). Test-only:
+  /// the fetch tests share one server, and a refusal in one test must not
+  /// decide what the next one observes.
+  @visibleForTesting
+  void resetDssState() {
+    _dssRetryAfter = null;
+    _dssLastFailure = null;
+    _dssLastSuccess = null;
+  }
+
   static const _dssPathPrefix = '/dss/';
   /// Upstream HiPS root (trailing slash: tile paths resolve beneath it).
   /// Static + overridable so a test can point the cache at a local stub.
