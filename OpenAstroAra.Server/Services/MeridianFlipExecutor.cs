@@ -111,7 +111,8 @@ public sealed class MeridianFlipExecutor : IMeridianFlipExecutor {
             IEquipmentReconnector? reconnector,
             ICameraMediator? cameraMediator,
             IFocuserMediator? focuserMediator,
-            OpenAstroAra.Sequencer.SequenceItem.Autofocus.IAutofocusExecutor? autofocusExecutor = null) {
+            OpenAstroAra.Sequencer.SequenceItem.Autofocus.IAutofocusExecutor? autofocusExecutor = null,
+            OpenAstroAra.Sequencer.Interfaces.IImageHistory? imageHistory = null) {
         this.profileService = profileService;
         this.telescopeMediator = telescopeMediator;
         this.guiderMediator = guiderMediator;
@@ -124,9 +125,12 @@ public sealed class MeridianFlipExecutor : IMeridianFlipExecutor {
         this.cameraMediator = cameraMediator;
         this.focuserMediator = focuserMediator;
         this.autofocusExecutor = autofocusExecutor;
+        this.imageHistory = imageHistory;
     }
 
     private readonly OpenAstroAra.Sequencer.SequenceItem.Autofocus.IAutofocusExecutor? autofocusExecutor;
+    // §58.4 step 3 — the session's completed autofocus runs (their focuser temperature) for if_temp_drifted.
+    private readonly OpenAstroAra.Sequencer.Interfaces.IImageHistory? imageHistory;
 
     [SuppressMessage("Design", "CA1031:Do not catch general exception types",
         Justification = "Flip-recovery boundary: any step (mount slew/flip, tracking toggle, plate-solve recenter, guider resume) can throw arbitrary driver/HTTP/IO exceptions. A flip MUST fail safe on ANY of them — restore tracking + resume the guider, then halt the sequence (return false) — never let an escape leave the OTA mid-flip or fault the engine. CA1031's fail-safe boundary applies.")]
@@ -202,30 +206,38 @@ public sealed class MeridianFlipExecutor : IMeridianFlipExecutor {
 
             await DoFlip(targetCoordinates, settings.SettleTime, safety, progress, token);
 
-            // §58.4 step 3 — re-focus is conditional, and per §58.7 a re-focus FAILURE must not abort
-            // the night: the flip proceeds (recenter → guiding resume) with the focuser restored to
-            // its pre-sweep position by the sweep's own failure policy, and the skip/failure logged.
-            if (settings.AutoFocusAfterFlip) {
-                if (autofocusExecutor is null) {
-                    Logger.Warning("Meridian Flip - AutoFocusAfterFlip is enabled but no autofocus executor is wired; skipping re-focus.");
-                } else {
-                    var focused = await autofocusExecutor.RunAutofocusAsync(progress, token);
-                    if (!focused) {
-                        Logger.Warning("Meridian Flip - post-flip autofocus failed; continuing the flip recovery (per §58.7 re-focus failures do not abort the night).");
-                        await Notify(NotificationSeverity.Warning, "Post-flip autofocus failed",
-                            "The re-focus after the meridian flip failed (the focuser was restored to its "
-                            + "pre-sweep position); imaging continues and focus may have drifted.");
-                    }
-                }
-            }
-
             if (settings.Recenter) {
                 await Recenter(targetCoordinates, safety, progress, token);
             }
 
-            if (guiderConnected) {
+            // §58.4 step 3 (after the re-centre, as the spec orders it) — re-focus is conditional on the
+            // profile's meridian_refocus policy (#1138), and per §58.7 a re-focus FAILURE must not abort
+            // the night: the recovery proceeds (guiding resume) with the focuser restored to its
+            // pre-sweep position by the sweep's own failure policy, and the skip/failure logged.
+            var (refocus, refocusReason) = RefocusDecision(settings, safety);
+            if (!refocus) {
+                Logger.Info($"Meridian Flip - no re-focus: {refocusReason}.");
+            } else if (autofocusExecutor is null) {
+                Logger.Warning($"Meridian Flip - re-focus wanted ({refocusReason}) but no autofocus executor is wired; skipping re-focus.");
+            } else {
+                Logger.Info($"Meridian Flip - re-focusing: {refocusReason}.");
+                var focused = await autofocusExecutor.RunAutofocusAsync(progress, token);
+                if (!focused) {
+                    Logger.Warning("Meridian Flip - post-flip autofocus failed; continuing the flip recovery (per §58.7 re-focus failures do not abort the night).");
+                    await Notify(NotificationSeverity.Warning, "Post-flip autofocus failed",
+                        "The re-focus after the meridian flip failed (the focuser was restored to its "
+                        + "pre-sweep position); imaging continues and focus may have drifted.");
+                }
+            }
+
+            // §58.4 step 4 — the guider comes back per meridian_guider_recal: auto_restore (the guider's
+            // own restore, reverse-Dec), full (a full recalibration), or skip.
+            var guiderMode = MeridianFlipPolicy.GuiderPlan(safety).Mode;
+            if (guiderConnected && guiderMode != MeridianFlipPolicy.GuiderSkip) {
                 await SelectNewGuideStar(token);
-                await ResumeAutoguider(progress, token);
+                await ResumeAutoguider(guiderMode == MeridianFlipPolicy.GuiderFull, progress, token);
+            } else if (guiderConnected) {
+                Logger.Info("Meridian Flip - guiding not resumed (meridian_guider_recal = skip).");
             }
 
             // Final settle — distinct from the post-flip-slew settle inside DoFlip. That one lets the mount
@@ -272,7 +284,9 @@ public sealed class MeridianFlipExecutor : IMeridianFlipExecutor {
                 var guiderResumed = !guidingStopped;
                 if (guidingStopped) {
                     try {
-                        await ResumeAutoguider(progress, CancellationToken.None);
+                        // Fail-safe, not policy: whatever meridian_guider_recal says, a flip that died
+                        // mid-way hands the mount back guided (the sequence halts anyway).
+                        await ResumeAutoguider(forceCalibration: false, progress, CancellationToken.None);
                         guiderResumed = true;
                     } catch (Exception resumeEx) {
                         Logger.Error("Meridian Flip - Resuming the guider after a flip error also failed.", resumeEx);
@@ -439,10 +453,41 @@ public sealed class MeridianFlipExecutor : IMeridianFlipExecutor {
         await guiderMediator.AutoSelectGuideStar(token);
     }
 
-    private async Task ResumeAutoguider(IProgress<ApplicationStatus> progress, CancellationToken token) {
-        Logger.Info("Meridian Flip - Resuming the guider.");
-        progress.Report(new ApplicationStatus { Source = "MeridianFlip", Status = "Resuming guiding" });
-        await guiderMediator.StartGuiding(false, progress, token);
+    private async Task ResumeAutoguider(bool forceCalibration, IProgress<ApplicationStatus> progress, CancellationToken token) {
+        Logger.Info(forceCalibration ? "Meridian Flip - Resuming the guider with a full recalibration." : "Meridian Flip - Resuming the guider.");
+        progress.Report(new ApplicationStatus { Source = "MeridianFlip", Status = forceCalibration ? "Recalibrating the guider" : "Resuming guiding" });
+        await guiderMediator.StartGuiding(forceCalibration, progress, token);
+    }
+
+    /// <summary>§58.4 step 3 — whether this flip re-focuses: the profile's meridian_refocus policy when the
+    /// store is wired (the normal daemon), else the NINA profile's AutoFocusAfterFlip flag (legacy).</summary>
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Design", "CA1031:Do not catch general exception types",
+        Justification = "The focuser temperature read is advisory for the drift decision; a device fault must not fail the flip.")]
+    private (bool Refocus, string Reason) RefocusDecision(IMeridianFlipSettings settings, SafetyPoliciesDto? safety) {
+        if (safety is null) {
+            return settings.AutoFocusAfterFlip ? (true, "AutoFocusAfterFlip is enabled") : (false, "AutoFocusAfterFlip is off");
+        }
+        double? lastAutofocusTemperature = null;
+        var points = imageHistory?.AutofocusPoints;
+        if (points is { Count: > 0 }) {
+            var last = points[points.Count - 1];
+            lastAutofocusTemperature = double.IsFinite(last.Temperature) ? last.Temperature : double.NaN;
+        }
+        // No focuser (a manual-focus refractor, or one that is not connected): nothing to re-focus
+        // with — whatever the policy says, the flip must not fail or run a sweep (review of #1320).
+        bool focuserConnected;
+        double? focuserTemperature = null;
+        try {
+            var info = focuserMediator?.GetInfo();
+            focuserConnected = info?.Connected == true;
+            focuserTemperature = info?.Temperature;
+        } catch (Exception) {
+            focuserConnected = false;
+        }
+        if (!focuserConnected) {
+            return (false, "no focuser is connected");
+        }
+        return MeridianFlipPolicy.RefocusDecision(safety.MeridianRefocus, safety.MeridianRefocusTempThresholdC, lastAutofocusTemperature, focuserTemperature);
     }
 
     private static async Task Settle(int settleSeconds, IProgress<ApplicationStatus> progress, CancellationToken token) {
@@ -486,7 +531,8 @@ public sealed class MeridianFlipExecutor : IMeridianFlipExecutor {
     /// reason when the flip must not start. Checks, per the §58.9 spec: the predicted post-flip
     /// target altitude clears the site horizon floor; the mount is healthy (connected, not parked,
     /// tracking, not already slewing); and the required equipment is connected (camera always;
-    /// guider when re-cal after flip is configured; focuser when AutoFocusAfterFlip is set) — with
+    /// guider for any meridian_guider_recal but "skip" — the legacy bool decides when the mode is
+    /// absent; focuser only when meridian_refocus is "always", #1138) — with
     /// one §42.3 hot-reconnect attempt before giving up on a disconnected device. The spec's
     /// "predicted slew duration sane" gate has no Alpaca API to read an estimate from, so the
     /// profile's ExpectedFlipSlewSeconds stands in for it in the Layer-2 watchdog instead.</summary>
@@ -521,14 +567,21 @@ public sealed class MeridianFlipExecutor : IMeridianFlipExecutor {
 
         // Required equipment, each with one §42.3 hot-reconnect attempt. Camera is always required
         // (imaging resumes after the flip); guider/focuser only when the flip flow will use them.
-        var recalGuider = safety.MeridianRecalGuider;
+        // The guider is required whenever the recovery will bring it back (any mode but "skip" —
+        // the #1138 mode alone decides; the legacy bool is only its wire mirror); the focuser only when
+        // the policy insists on a re-focus.
+        var recalGuider = MeridianFlipPolicy.GuiderPlan(safety).Required;
         if (await EnsureConnected(DeviceType.Camera, () => cameraMediator?.GetInfo().Connected ?? false, token) is { } cameraFail) {
             return cameraFail;
         }
         if (recalGuider && await EnsureConnected(DeviceType.Guider, () => guiderMediator.GetInfo().Connected, token) is { } guiderFail) {
             return guiderFail;
         }
-        if (settings.AutoFocusAfterFlip && await EnsureConnected(DeviceType.Focuser, () => focuserMediator?.GetInfo().Connected ?? false, token) is { } focuserFail) {
+        // The focuser is REQUIRED only when the policy insists on a re-focus ("always"); the default
+        // if_temp_drifted re-focuses when it can and a rig with no focuser simply keeps its focus, so a
+        // manual-focus refractor must not fail every flip (review of #1320).
+        var mustRefocus = MeridianFlipPolicy.RefocusMode(safety.MeridianRefocus) == MeridianFlipPolicy.RefocusAlways;
+        if (mustRefocus && await EnsureConnected(DeviceType.Focuser, () => focuserMediator?.GetInfo().Connected ?? false, token) is { } focuserFail) {
             return focuserFail;
         }
 

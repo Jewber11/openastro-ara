@@ -1,4 +1,5 @@
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart' show visibleForTesting;
 
 import '../models/profile_list.dart';
 import '../models/profile_meta.dart';
@@ -367,7 +368,7 @@ class ProfileApi {
   /// GET the active profile's safety policies.
   Future<SafetyPolicies> getSafetyPolicies() async {
     final res = await _dio.get<Map<String, dynamic>>('/api/v1/profile/safety');
-    return _safetyPoliciesFromJson(res.data ?? const {});
+    return safetyPoliciesFromJson(res.data ?? const {});
   }
 
   /// PUT the active profile's safety policies. `first_flip_confirmed` is
@@ -378,9 +379,9 @@ class ProfileApi {
   Future<SafetyPolicies> putSafetyPolicies(SafetyPolicies value) async {
     final res = await _dio.put<Map<String, dynamic>>(
       '/api/v1/profile/safety',
-      data: _safetyPoliciesToJson(value),
+      data: safetyPoliciesToJson(value),
     );
-    return _safetyPoliciesFromJson(res.data ?? const {});
+    return safetyPoliciesFromJson(res.data ?? const {});
   }
 
   /// §58.8 — re-arm the one-time first-flip announce (the daemon clears
@@ -390,7 +391,7 @@ class ProfileApi {
     final res = await _dio.post<Map<String, dynamic>>(
       '/api/v1/profile/safety/first-flip/rearm',
     );
-    return _safetyPoliciesFromJson(res.data ?? const {});
+    return safetyPoliciesFromJson(res.data ?? const {});
   }
 
   /// GET the active profile's autofocus settings.
@@ -955,7 +956,9 @@ class ProfileApi {
 
   // ── Safety policies JSON mapping ───────────────────────────────────────
 
-  static SafetyPolicies _safetyPoliciesFromJson(Map<String, dynamic> j) =>
+  /// The safety-policies wire mapping, exposed for the round-trip test (#1138).
+  @visibleForTesting
+  static SafetyPolicies safetyPoliciesFromJson(Map<String, dynamic> j) =>
       SafetyPolicies(
         onUnsafe: _unsafeActionFromString(j['on_unsafe'] as String?),
         autoResumeWhenSafe: (j['auto_resume_when_safe'] as bool?) ?? true,
@@ -964,6 +967,16 @@ class ProfileApi {
         meridianPauseMin: (j['meridian_pause_min'] as num?)?.toInt() ?? 5,
         meridianRecenter: (j['meridian_recenter'] as bool?) ?? true,
         meridianRecalGuider: (j['meridian_recal_guider'] as bool?) ?? true,
+        meridianRefocus: _meridianRefocusFromString(j['meridian_refocus'] as String?),
+        meridianRefocusTempThresholdC:
+            (j['meridian_refocus_temp_threshold_c'] as num?)?.toDouble() ?? 2.0,
+        // A daemon/profile from before the mode carries null: left null here too, so a save
+        // does not invent a mode (the daemon keeps its legacy behaviour until the user picks one).
+        meridianGuiderRecal: j['meridian_guider_recal'] is String
+            ? _guiderRecalFromString(j['meridian_guider_recal'] as String)
+            : null,
+        unattendedWindowStart: (j['unattended_window_start'] as String?) ?? '',
+        unattendedWindowEnd: (j['unattended_window_end'] as String?) ?? '',
         onAltitudeLimit: _altitudeLimitActionFromString(
           j['on_altitude_limit'] as String?,
         ),
@@ -1015,7 +1028,8 @@ class ProfileApi {
             (j['sky_flat_sun_altitude'] as num?)?.toDouble() ?? -9.0,
       );
 
-  static Map<String, dynamic> _safetyPoliciesToJson(SafetyPolicies v) => {
+  @visibleForTesting
+  static Map<String, dynamic> safetyPoliciesToJson(SafetyPolicies v) => {
     'on_unsafe': _unsafeActionToString(v.onUnsafe),
     'auto_resume_when_safe': v.autoResumeWhenSafe,
     'resume_delay_min': v.resumeDelayMin,
@@ -1023,6 +1037,15 @@ class ProfileApi {
     'meridian_pause_min': v.meridianPauseMin,
     'meridian_recenter': v.meridianRecenter,
     'meridian_recal_guider': v.meridianRecalGuider,
+    'meridian_refocus': _meridianRefocusToString(v.meridianRefocus),
+    'meridian_refocus_temp_threshold_c': v.meridianRefocusTempThresholdC,
+    'meridian_guider_recal': v.meridianGuiderRecal == null
+        ? null
+        : _guiderRecalToString(v.meridianGuiderRecal!),
+    'unattended_window_start':
+        v.unattendedWindowStart.isEmpty ? null : v.unattendedWindowStart,
+    'unattended_window_end':
+        v.unattendedWindowEnd.isEmpty ? null : v.unattendedWindowEnd,
     'on_altitude_limit': _altitudeLimitActionToString(v.onAltitudeLimit),
     'park_if_no_more_targets': v.parkIfNoMoreTargets,
     'on_guider_lost': _guiderLostActionToString(v.onGuiderLost),
@@ -1085,6 +1108,43 @@ class ProfileApi {
         return 'never';
     }
   }
+
+  static MeridianRefocusMode _meridianRefocusFromString(String? s) {
+    switch (s) {
+      case 'always':
+        return MeridianRefocusMode.always;
+      case 'never':
+        return MeridianRefocusMode.never;
+      case 'if_temp_drifted':
+      default:
+        return MeridianRefocusMode.ifTempDrifted;
+    }
+  }
+
+  static String _meridianRefocusToString(MeridianRefocusMode m) =>
+      switch (m) {
+        MeridianRefocusMode.always => 'always',
+        MeridianRefocusMode.never => 'never',
+        MeridianRefocusMode.ifTempDrifted => 'if_temp_drifted',
+      };
+
+  static GuiderRecalMode _guiderRecalFromString(String? s) {
+    switch (s) {
+      case 'full':
+        return GuiderRecalMode.full;
+      case 'skip':
+        return GuiderRecalMode.skip;
+      case 'auto_restore':
+      default:
+        return GuiderRecalMode.autoRestore;
+    }
+  }
+
+  static String _guiderRecalToString(GuiderRecalMode m) => switch (m) {
+        GuiderRecalMode.full => 'full',
+        GuiderRecalMode.skip => 'skip',
+        GuiderRecalMode.autoRestore => 'auto_restore',
+      };
 
   static UnsafeAction _unsafeActionFromString(String? s) {
     switch (s) {
