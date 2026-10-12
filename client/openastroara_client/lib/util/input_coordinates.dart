@@ -19,9 +19,12 @@ const String inputCoordinatesType =
 ///
 /// RA is normalized into `[0, 360)` first (so a wrapped 360°, or a small
 /// negative from rounding, lands cleanly), then expressed as hours = deg / 15.
-/// Dec is clamped to `[-90, 90]`; its sign is carried by `NegativeDec` and the
-/// degree/minute/second fields hold the magnitude (matching NINA, which keeps
-/// the components unsigned).
+/// Dec is clamped to `[-90, 90]` and written in NINA's shape: `DecDegrees`
+/// is SIGNED (`-5` for -5°24′) and `NegativeDec` marks the sign, which alone
+/// carries the -0°xx′ case; minutes and seconds hold the unsigned remainder.
+/// The daemon's `InputCoordinates` decodes `DecDegrees - M/60 - S/3600` when
+/// the flag is set, so an unsigned degree field would land the wrong side of
+/// the whole degree.
 ///
 /// Seconds stay fractional (`double`) so no precision is lost — H + M/60 + S/3600
 /// reproduces the input to within floating-point error.
@@ -38,7 +41,11 @@ Map<String, dynamic> inputCoordinatesFromDeg(double raDeg, double decDeg) {
     'RAMinutes': rm,
     'RASeconds': rs,
     'NegativeDec': negativeDec,
-    'DecDegrees': dd,
+    // NINA's shape, which the daemon's InputCoordinates decodes: DecDegrees
+    // carries the SIGN (-5 for -5°24′); NegativeDec alone marks the -0°xx′
+    // case. An unsigned 5 with the flag decodes as -(5 - 24/60) = -4.6° on
+    // the daemon — every southern target was off by twice its arc-minutes.
+    'DecDegrees': negativeDec ? -dd : dd,
     'DecMinutes': dm,
     'DecSeconds': ds,
   };
@@ -65,10 +72,12 @@ Map<String, dynamic> inputCoordinatesFromDeg(double raDeg, double decDeg) {
   }
   final raHours = rh + rm / 60.0 + rs / 3600.0;
   final raDeg = _normalizeRaDeg(raHours * 15.0);
+  // Both shapes read: NINA's signed DecDegrees (-5, flag true) and the
+  // unsigned-plus-flag shape this client wrote before the sign fix.
   final decMagnitude =
-      (dd + dm / 60.0 + ds / 3600.0).clamp(0.0, 90.0).toDouble();
-  final decDeg =
-      coordinates['NegativeDec'] == true ? -decMagnitude : decMagnitude;
+      (dd.abs() + dm / 60.0 + ds / 3600.0).clamp(0.0, 90.0).toDouble();
+  final negative = coordinates['NegativeDec'] == true || dd < 0;
+  final decDeg = negative ? -decMagnitude : decMagnitude;
   return (raDeg: raDeg, decDeg: decDeg);
 }
 
