@@ -61,12 +61,103 @@ public sealed partial class SqliteFrameRepository : IFrameRepository {
     private readonly IWsBroadcaster? _ws;
     private readonly ILogger<SqliteFrameRepository> _logger;
 
-    public SqliteFrameRepository(IAraDatabase db, IProfileStore profile, IWsBroadcaster? ws = null, ILogger<SqliteFrameRepository>? logger = null) {
+    private readonly Func<IEnumerable<string>> _captureRoots;
+
+    public SqliteFrameRepository(IAraDatabase db, IProfileStore profile, IWsBroadcaster? ws = null, ILogger<SqliteFrameRepository>? logger = null,
+            Func<IEnumerable<string>>? captureRoots = null) {
         _db = db;
         _profile = profile;
         _ws = ws;
         _logger = logger ?? NullLogger<SqliteFrameRepository>.Instance;
+        // #1194 — default: the profile's save directory (read live) and the §29 store mount. Program.cs
+        // adds the profile-dir fallback CameraService writes to when the save directory is unavailable.
+        _captureRoots = captureRoots ?? (() => new[] { _profile.GetStorageSettings().SaveDirectory, StoreMountProbe.MountPoint });
     }
+
+    /// <summary>
+    /// #1194 — a catalogued <c>file_path</c> is trusted only when it sits under one of the capture
+    /// roots the daemon itself writes to. Every read, download, export and delete goes through here,
+    /// so a corrupted or tampered row cannot make the daemon serve or delete an arbitrary file.
+    /// Returns the normalized path (symlinks on the file itself resolved and re-checked) or null,
+    /// which callers treat exactly like a missing file. Non-existent files are null too, so the
+    /// old <c>IsNullOrEmpty || !File.Exists</c> checks collapse into this one call.
+    /// </summary>
+    internal string? ConfinedExistingPath(string? filePath) => ConfinedPath(filePath, mustExist: true);
+
+    /// <summary>The confinement check alone (<paramref name="mustExist"/> false): a FITS the user
+    /// already removed by hand still has sidecars (previews, thumbnail, histogram cache) beside it
+    /// that a delete-from-disk must sweep, so the delete path confines the catalogued path but does
+    /// not require the FITS itself to be present. A missing file cannot be a symlink, so the
+    /// link check is skipped for it.</summary>
+    internal string? ConfinedPath(string? filePath, bool mustExist) {
+        if (string.IsNullOrWhiteSpace(filePath)) {
+            return null;
+        }
+        string full;
+        try {
+            full = Path.GetFullPath(filePath);
+        } catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException) {
+            LogPathRefused(filePath, "not a valid path");
+            return null;
+        }
+        if (!IsUnderCaptureRoot(full)) {
+            LogPathRefused(filePath, "outside the capture roots");
+            return null;
+        }
+        if (!File.Exists(full)) {
+            return mustExist ? null : full;
+        }
+        try {
+            // A symlink planted inside a root must not reach outside it either.
+            if (File.ResolveLinkTarget(full, returnFinalTarget: true) is { } target && !IsUnderCaptureRoot(target.FullName)) {
+                LogPathRefused(filePath, "a link that leaves the capture roots");
+                return null;
+            }
+        } catch (IOException) {
+            // Broken link / vanished mid-check: treat as missing.
+            return null;
+        } catch (UnauthorizedAccessException) {
+            return null;
+        }
+        return full;
+    }
+
+    private bool IsUnderCaptureRoot(string fullPath) {
+        IEnumerable<string> roots;
+        try {
+            roots = _captureRoots();
+        } catch (Exception ex) when (ex is InvalidOperationException or IOException) {
+            return false;
+        }
+        // Roots are compared as configured, not resolved: a save directory that is itself a symlink
+        // (~/Pictures → an external disk) matches rows written through that same path, which is how
+        // CameraService writes them. A row holding the resolved target instead would be refused;
+        // the daemon never writes such a row, so that stays a documented edge rather than a second
+        // resolution pass on every read.
+        var sep = Path.DirectorySeparatorChar;
+        foreach (var root in roots) {
+            if (string.IsNullOrWhiteSpace(root)) {
+                continue;
+            }
+            string fullRoot;
+            try {
+                fullRoot = Path.GetFullPath(root).TrimEnd(sep, Path.AltDirectorySeparatorChar) + sep;
+            } catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException) {
+                continue;
+            }
+            if (fullPath.StartsWith(fullRoot, PathComparison)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Linux stores are case-sensitive; macOS/Windows dev boxes are not. Compare the way the OS does.
+    private static readonly StringComparison PathComparison =
+        OperatingSystem.IsLinux() ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Frame file refused: catalogued path '{FilePath}' is {Reason}; serving/deleting it was skipped (#1194)")]
+    private partial void LogPathRefused(string filePath, string reason);
 
     /// <summary>
     /// Populate the catalog with fixture rows if the frames table is
@@ -549,8 +640,9 @@ public sealed partial class SqliteFrameRepository : IFrameRepository {
     }
 
     public async Task<(byte[] Bytes, string ContentType, OpenAstroAra.Stretch.StretchParams? AppliedManual)?> GetPreviewAsync(Guid id, FramePreviewRequestDto request, CancellationToken ct) {
-        var (filePath, frameType) = await GetPathAndTypeAsync(id, ct);
-        if (string.IsNullOrEmpty(filePath) || !File.Exists(filePath)) {
+        var (catalogued, frameType) = await GetPathAndTypeAsync(id, ct);
+        var filePath = ConfinedExistingPath(catalogued);
+        if (filePath is null) {
             return (PlaceholderJpegBytes, "image/jpeg", null);
         }
 
@@ -670,8 +762,9 @@ public sealed partial class SqliteFrameRepository : IFrameRepository {
     }
 
     public async Task<(byte[] Bytes, string ContentType)?> GetThumbnailAsync(Guid id, CancellationToken ct) {
-        var (filePath, frameType) = await GetPathAndTypeAsync(id, ct);
-        if (string.IsNullOrEmpty(filePath) || !File.Exists(filePath)) {
+        var (catalogued, frameType) = await GetPathAndTypeAsync(id, ct);
+        var filePath = ConfinedExistingPath(catalogued);
+        if (filePath is null) {
             return (PlaceholderJpegBytes, "image/jpeg");
         }
         // §65.4 names thumbnails <stem>.thumb.jpg beside the FITS and the
@@ -720,8 +813,9 @@ public sealed partial class SqliteFrameRepository : IFrameRepository {
         // the plate-solver. The real profileService is passed in (the CLI solver writes a temp FITS via the
         // image's SaveToDisk, which reads the profile for the file pattern). Star detection/annotator are
         // genuinely untouched by solving → null. FITS frames are 16-bit; isBayered preserves the CFA flag.
-        var (filePath, _) = await GetPathAndTypeAsync(id, ct);
-        if (string.IsNullOrEmpty(filePath) || !File.Exists(filePath)) {
+        var (catalogued, _) = await GetPathAndTypeAsync(id, ct);
+        var filePath = ConfinedExistingPath(catalogued);
+        if (filePath is null) {
             return null;
         }
         // A corrupt/truncated FITS lets LoadFitsPixels throw → 500, consistent with GetPreviewAsync/
@@ -739,8 +833,9 @@ public sealed partial class SqliteFrameRepository : IFrameRepository {
         // astrometry natives stamps the mount's own epoch — ≤~0.4° off today, well inside the default search
         // radius, so this reader deliberately ignores EQUINOX). AstroUtil.HMSToDegrees/DMSToDegrees invert
         // those formats; a frame taken with no mount connected (or one that predates #1091) lacks the cards.
-        var (filePath, _) = await GetPathAndTypeAsync(id, ct);
-        if (string.IsNullOrEmpty(filePath) || !File.Exists(filePath)) {
+        var (catalogued, _) = await GetPathAndTypeAsync(id, ct);
+        var filePath = ConfinedExistingPath(catalogued);
+        if (filePath is null) {
             return null;
         }
         // The whole read is best-effort: a header hint is optional, so a FITS open/read fault (a corrupt
@@ -860,8 +955,8 @@ public sealed partial class SqliteFrameRepository : IFrameRepository {
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = "SELECT file_path FROM frames WHERE id = $id LIMIT 1;";
         cmd.Parameters.AddWithValue("$id", id.ToString());
-        var filePath = (string?)(await cmd.ExecuteScalarAsync(ct));
-        if (string.IsNullOrEmpty(filePath) || !File.Exists(filePath)) {
+        var filePath = ConfinedExistingPath((string?)(await cmd.ExecuteScalarAsync(ct)));
+        if (filePath is null) {
             return null;
         }
         // FileStream owned by the response pipeline — ASP.NET Core
@@ -1002,7 +1097,7 @@ public sealed partial class SqliteFrameRepository : IFrameRepository {
         var entries = new List<(string Path, string EntryName)>();
         var seenNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var frameId in request.FrameIds) {
-            if (!byId.TryGetValue(frameId, out var path) || path.Length == 0 || !File.Exists(path)) continue;
+            if (!byId.TryGetValue(frameId, out var catalogued) || ConfinedExistingPath(catalogued) is not { } path) continue;
             var name = Path.GetFileName(path);
             if (!seenNames.Add(name)) {
                 // Suffix until genuinely unique — a single rename can itself
@@ -1058,7 +1153,12 @@ public sealed partial class SqliteFrameRepository : IFrameRepository {
             // a detached volume. FITS + the §65.4 sidecars (default/variant
             // previews, thumbnail) all go; locked/missing files are skipped.
             foreach (var fitsPath in paths) {
-                DeleteFrameFilesBestEffort(fitsPath);
+                // #1194 — a row pointing outside the capture roots deletes nothing (and its sidecars
+                // are enumerated from the confined path, so they stay inside the roots too). The FITS
+                // itself may already be gone (removed over SMB/Finder): its sidecars still go.
+                if (ConfinedPath(fitsPath, mustExist: false) is { } confined) {
+                    DeleteFrameFilesBestEffort(confined);
+                }
             }
         }
         return PlaceholderEquipmentHelpers.Accepted("frames.bulk-delete", idempotencyKey);
@@ -1111,8 +1211,13 @@ public sealed partial class SqliteFrameRepository : IFrameRepository {
     }
 
     public async Task<bool> DeletePreviewVariantsAsync(Guid id, CancellationToken ct) {
-        var (filePath, _) = await GetPathAndTypeAsync(id, ct);
-        if (string.IsNullOrEmpty(filePath)) return false;
+        var (catalogued, _) = await GetPathAndTypeAsync(id, ct);
+        if (string.IsNullOrEmpty(catalogued)) return false;
+        // #1194 — the variants are enumerated from the catalogued path's directory, so that path
+        // must sit under a capture root; the FITS itself may be gone (storage rotated), hence
+        // mustExist: false. A refused row reports "nothing to delete" and logs the refusal.
+        var filePath = ConfinedPath(catalogued, mustExist: false);
+        if (filePath is null) return true;
         // Frame exists in the catalog; missing FITS on disk doesn't make
         // this 404 (user may have rotated storage). Variants live next to
         // the FITS via the §65.4 cache-key pattern.
@@ -1188,8 +1293,9 @@ public sealed partial class SqliteFrameRepository : IFrameRepository {
     }
 
     public async Task<FrameHistogramDto?> GetHistogramAsync(Guid id, CancellationToken ct) {
-        var (filePath, _) = await GetPathAndTypeAsync(id, ct);
-        if (string.IsNullOrEmpty(filePath) || !File.Exists(filePath)) {
+        var (catalogued, _) = await GetPathAndTypeAsync(id, ct);
+        var filePath = ConfinedExistingPath(catalogued);
+        if (filePath is null) {
             return null;
         }
         FrameHistogramDto? histogram = null;
