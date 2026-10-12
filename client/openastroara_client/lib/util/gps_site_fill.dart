@@ -17,7 +17,7 @@ class GpsSiteFill {
   final double? alt;
 
   /// On success, a describe-the-source label, e.g.
-  /// "the server's GPS dongle" or "this Mac's own location".
+  /// "the GPS dongle on this Mac" or "the rig's last known position".
   final String sourceLabel;
 
   /// On failure, a ready-to-show explanation.
@@ -97,7 +97,7 @@ String permissionHint(ClientPlatform p) => switch (p) {
   ClientPlatform.linux =>
     'On Linux there is no system location service to fall back on — '
         'plug a USB GPS dongle into this computer (Settings → Site → GPS on '
-        'this computer) or into the machine running Ara Server.',
+        'this computer).',
   ClientPlatform.android =>
     'Open Settings → Apps → OpenAstro Ara → Permissions → Location and '
         'allow it while using the app, then tap Fill from GPS again.',
@@ -112,11 +112,11 @@ String permissionHint(ClientPlatform p) => switch (p) {
 String noFixHint(ClientPlatform p) => switch (p) {
   ClientPlatform.android || ClientPlatform.iOS =>
     'Make sure Location is on and try again with a clear view of the '
-        'sky, or plug a USB GPS dongle into the machine running Ara Server.',
+        'sky.',
   _ =>
     'Desktop location needs a network connection — connect to one, or '
         'plug a USB GPS dongle into this computer (Settings → Site → GPS on '
-        'this computer) or into the machine running Ara Server.',
+        'this computer).',
 };
 
 String get _noFixHint => noFixHint(clientPlatform);
@@ -125,7 +125,8 @@ String get _permissionHint => permissionHint(clientPlatform);
 
 /// Try to fill an observing site from GPS, in this order: (0) a fresh fix from
 /// a USB GPS dongle on THIS computer when "GPS on this computer" is enabled;
-/// (1) a USB GPS dongle on the server machine (§31.3 time-sync state); (2) the
+/// (1) the position the rig already holds (§31.3 time-sync state, pushed by
+/// an earlier client or phone sync); (2) the
 /// client dongle read fresh when it had no recent fix; (3) **the client machine's own
 /// location** (macOS/Windows/Android/iOS; Linux has no registered geolocator
 /// backend), accepting only a fix less than ten minutes old. This one routine
@@ -154,9 +155,9 @@ Future<GpsSiteFill> fillSiteFromGps(WidgetRef ref) async {
     );
   }
 
-  // 1) The server's USB GPS dongle fix.
+  // 1) The position the rig already holds from an earlier push.
   final api = ref.read(timeSyncApiProvider);
-  var dongleReadFailed = false;
+  var rigStateUnavailable = false;
   if (api != null) {
     try {
       final state = await api.getState();
@@ -166,13 +167,13 @@ Future<GpsSiteFill> fillSiteFromGps(WidgetRef ref) async {
           lat: loc.lat,
           lng: loc.lng,
           alt: loc.alt,
-          sourceLabel: "the server's GPS dongle (source: ${state.source})",
+          sourceLabel: "the rig's last known position (source: ${state.source})",
         );
       }
     } catch (_) {
-      // The dongle can't be read (server unreachable, error) — distinct from
-      // "no fix yet", so the user isn't told to wait under open sky.
-      dongleReadFailed = true;
+      // The rig can't be asked (unreachable, error) — distinct from "no fix
+      // yet", so the user isn't told to wait under open sky.
+      rigStateUnavailable = true;
     }
   }
 
@@ -208,9 +209,9 @@ Future<GpsSiteFill> fillSiteFromGps(WidgetRef ref) async {
   // 3) Fallback: this machine's own location (a fresh fix is required).
   final baseNote = api == null
       ? 'No server connected, '
-      : dongleReadFailed
-      ? "Couldn't read the server's GPS state, "
-      : 'No GPS dongle fix yet, ';
+      : rigStateUnavailable
+      ? "Couldn't read the rig's position, "
+      : 'The rig has no position yet, ';
 
   try {
     // Deterministic test seam first (real platform channels aren't in tests).
