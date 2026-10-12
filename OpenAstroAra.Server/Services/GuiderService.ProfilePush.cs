@@ -14,6 +14,7 @@
 
 using OpenAstroAra.Server.Contracts;
 using OpenAstroAra.Server.Contracts.WsEvents;
+using System;
 using System.Linq;
 using System.Text.Json.Nodes;
 using System.Threading;
@@ -34,9 +35,9 @@ public sealed partial class GuiderService {
     /// InvalidOperationException (→ 409, typed).</summary>
     // Non-async outer so RequireConnectedGuider's "not connected" surfaces synchronously — same contract as
     // the other explicit guide ops (and what the endpoint's 409 mapping relies on).
-    public Task<OperationAcceptedDto> PushGuiderProfileAsync(string? idempotencyKey, CancellationToken ct) {
+    public Task<OperationAcceptedDto> PushGuiderProfileAsync(string? idempotencyKey, CancellationToken ct, bool refuseUnservedSelection = true) {
         var guider = RequireConnectedGuider();
-        return PushAsync(guider, idempotencyKey, ct);
+        return PushAsync(guider, idempotencyKey, refuseUnservedSelection, ct);
     }
 
     /// <summary>Tuning-only push — the runtime-safe subset, equipment left connected (guiding continues).
@@ -59,10 +60,19 @@ public sealed partial class GuiderService {
     }
 
     private async Task<OperationAcceptedDto> PushAsync(
-            OpenAstroAra.Equipment.Equipment.MyGuider.PHD2.PHD2Guider guider, string? idempotencyKey, CancellationToken ct) {
+            OpenAstroAra.Equipment.Equipment.MyGuider.PHD2.PHD2Guider guider, string? idempotencyKey,
+            bool refuseUnservedSelection, CancellationToken ct) {
         // Capture the selection BEFORE the push so the §63.17 invalidation compare is against what this push
         // actually sent (a concurrent settings edit mid-push shouldn't skew the decision).
         var settings = _profileService.ActiveProfile.GuiderSettings;
+        // #1306 — the explicit push refuses, saying why, rather than send a selection that can only leave
+        // the daemon on localhost:0 with its equipment disconnected (the 422 reaches the client's Apply
+        // button). The §63.4 profile-switch follow is exempt (review r2): a profile saved before this rule
+        // must still get its guider twin and tuning, with the guider's own Alpaca server left as it is.
+        if (refuseUnservedSelection
+                && OpenAstroAra.Equipment.Equipment.MyGuider.PHD2.PHD2Guider.DescribeUnservedAlpacaSelection(settings) is { } reason) {
+            throw new GuiderSelectionInvalidException(reason);
+        }
         var camera = settings.GuiderCamera;
         var cameraId = settings.GuiderCameraId;
         var methods = await guider.RepushGuiderEngineConfigAsync(ct).ConfigureAwait(false);
@@ -111,4 +121,13 @@ public sealed partial class GuiderService {
         await EmitCalibrationEventAsync(WsEventCatalog.GuiderDarkLibraryInvalidated,
             new JsonObject { ["reason"] = "guide_camera_changed" }).ConfigureAwait(false);
     }
+}
+
+/// <summary>#1306 — the stored guider equipment selection cannot be pushed as it stands (a bare Alpaca
+/// choice with no server). The endpoint maps it to <c>422 Unprocessable Entity</c>; the message says
+/// which slot and what to set.</summary>
+public class GuiderSelectionInvalidException : Exception {
+    public GuiderSelectionInvalidException() { }
+    public GuiderSelectionInvalidException(string message) : base(message) { }
+    public GuiderSelectionInvalidException(string message, Exception innerException) : base(message, innerException) { }
 }

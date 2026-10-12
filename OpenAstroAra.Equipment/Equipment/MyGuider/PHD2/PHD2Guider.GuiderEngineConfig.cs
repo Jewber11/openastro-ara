@@ -156,6 +156,47 @@ namespace OpenAstroAra.Equipment.Equipment.MyGuider.PHD2 {
             return (m.Groups[1].Value, port, device);
         }
 
+        /// <summary>§63.20 / #1306 — an Alpaca selection is only pushable when a server is known: the guide
+        /// camera's <c>[host:port/N]</c> suffix, or the stored Alpaca host AND port. Without one the push never
+        /// sends <c>set_alpaca_server</c>, the daemon stays on <c>localhost:0</c> and every connect fails with
+        /// "equipment failed to connect". That covers the daemon's bare generic <c>"Alpaca Camera"</c> as well
+        /// as a suffixed mount/rotator beside a non-Alpaca camera (review r4: the camera alone carries the
+        /// server). Returns a one-line reason naming the slot, or null when pushable. Pure.</summary>
+        public static string? DescribeUnservedAlpacaSelection(IGuiderSettings guider) {
+            ArgumentNullException.ThrowIfNull(guider);
+            var cameraEp = ParseAlpacaSelectionEndpoint(guider.GuiderCamera);
+            var hasHost = cameraEp is not null || !string.IsNullOrWhiteSpace(guider.GuiderAlpacaHost);
+            var hasPort = cameraEp is not null || guider.GuiderAlpacaPort > 0;
+            if (hasHost && hasPort) {
+                return null;
+            }
+            var missing = !hasHost && !hasPort ? "host and port" : !hasHost ? "host" : "port";
+            foreach (var (slot, selection) in new[] {
+                ("guide camera", guider.GuiderCamera), ("guide mount", guider.GuiderMount),
+                ("aux mount", guider.GuiderAuxMount), ("rotator", guider.GuiderRotator) }) {
+                if (!IsAlpacaSelection(selection)) {
+                    continue;
+                }
+                var name = selection!.Trim();
+                if (ParseAlpacaSelectionEndpoint(name) is { } ep) {
+                    return $"The {slot} '{name}' is on Alpaca server {ep.Host}:{ep.Port} but the guider's Alpaca {missing} "
+                        + $"{(missing.Contains(' ', StringComparison.Ordinal) ? "are" : "is")} unset: pick the guide camera on that server or set the Alpaca host and port to it.";
+                }
+                return $"The {slot} '{name}' names an Alpaca driver but no server: pick a device "
+                    + $"such as '{name} [host:port/N]' or set the guider's Alpaca {missing}.";
+            }
+            return null;
+        }
+
+        /// <summary>True for the daemon's <c>"Alpaca …"</c> choice strings, bare or suffixed.</summary>
+        public static bool IsAlpacaSelection(string? selection) =>
+            !string.IsNullOrWhiteSpace(selection)
+            && selection.TrimStart().StartsWith("Alpaca ", StringComparison.OrdinalIgnoreCase);
+
+        /// <summary>True for the daemon's generic <c>"Alpaca …"</c> choice string with no endpoint suffix.</summary>
+        public static bool IsBareAlpacaSelection(string? selection) =>
+            IsAlpacaSelection(selection) && ParseAlpacaSelectionEndpoint(selection) is null;
+
         /// <summary>
         /// Pure mapping from <see cref="IGuiderSettings"/> to the ordered PHD2 setter messages. Focal length /
         /// pixel size are only pushed when configured (&gt; 0). Aggressiveness is sent as the 0..1 fraction
