@@ -450,6 +450,12 @@ const String startGuidingType =
 const String waitForUserType =
     'OpenAstroAra.Sequencer.SequenceItem.Utility.WaitForUser, OpenAstroAra.Sequencer';
 
+/// #1264 — the unguided tracking probe the run builder emits on a rig without
+/// a guider: a ladder of exposures at the target, measured for star trailing,
+/// deciding the longest sub the mount holds tonight.
+const String trackingProbeType =
+    'OpenAstroAra.Sequencer.SequenceItem.Telescope.TrackingProbe, OpenAstroAra.Sequencer';
+
 /// The daemon `FilterInfo` `$type` — the value shape of `SwitchFilter.Filter`.
 /// Build instances with [buildFilterInfo] so the `{_name, _position}` wire
 /// shape can't drift between emitters.
@@ -770,6 +776,33 @@ const List<InstructionDef> instructionCatalog = [
         'Inherit from target',
         InstructionFieldType.boolean,
         defaultValue: false,
+      ),
+    ],
+  ),
+  // #1264 — unguided tracking probe: ladder (10/30/60/120 s, then the planned
+  // exposure or twice the prior as a final rung, whichever is lower), pass rule
+  // eccentricity ≤ 0.5 and FWHM within 1.2× the first rung; the ceiling is the
+  // longest passing rung moved halfway toward the first failing one, and the
+  // imaging loops after the probe are shortened to it.
+  InstructionDef(
+    type: trackingProbeType,
+    label: 'Tracking Probe',
+    category: InstructionCategory.telescope,
+    icon: Icons.straighten_outlined,
+    fields: [
+      InstructionField(
+        'MaxExposure',
+        'Longest exposure to try (s, 0 = ladder top)',
+        InstructionFieldType.number,
+        defaultValue: 0.0,
+        min: 0,
+      ),
+      InstructionField(
+        'PriorSeconds',
+        'Mount spec-sheet ceiling (s, blank = unknown)',
+        InstructionFieldType.number,
+        defaultValue: null,
+        min: 0,
       ),
     ],
   ),
