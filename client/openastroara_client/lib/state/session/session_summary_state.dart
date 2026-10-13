@@ -118,41 +118,39 @@ class SessionSummaryNotifier extends AsyncNotifier<SessionSummary?> {
       final api = ref.read(sequenceApiProvider);
       if (api == null) return;
       final list = (await api.list(limit: 50)).items;
-      // Newest-touched first, so a long list still yields the night's run.
-      final candidates =
-          list
-              .where(
-                (s) =>
-                    !isDraftSequenceId(s.id) &&
-                    isSummaryWorthyState(s.currentRunState),
-              )
-              .toList()
-            ..sort(
-              (a, b) => (b.modifiedUtc ?? DateTime(0)).compareTo(
-                a.modifiedUtc ?? DateTime(0),
-              ),
-            );
-      candidates.length = candidates.length > 8 ? 8 : candidates.length;
+      // Every sequence with an ended or parked run is read (the list is at
+      // most 50 rows and the per-id read is cheap): choosing by the list's
+      // edit time would miss a night on a sequence last edited weeks ago.
+      final candidates = list
+          .where(
+            (s) =>
+                !isDraftSequenceId(s.id) &&
+                isSummaryWorthyState(s.currentRunState),
+          )
+          .toList();
       if (candidates.isEmpty) {
         if (ref.mounted) state = const AsyncData(null);
         return;
       }
       final notifications = await _freshInbox();
-      final summaries = <SessionSummary>[];
-      for (final seq in candidates) {
-        try {
-          final run = await api.getRunState(seq.id);
-          if (run == null) continue;
-          final s = buildSessionSummary(
-            sequence: seq,
-            run: run,
-            notifications: notifications,
-          );
-          if (s != null) summaries.add(s);
-        } catch (e) {
-          debugPrint('[session-summary] run state for ${seq.id} failed: $e');
-        }
-      }
+      // All the per-id reads at once: a connect on a large library should not
+      // wait for 50 sequential round-trips.
+      final summaries = (await Future.wait(
+        candidates.map((seq) async {
+          try {
+            final run = await api.getRunState(seq.id);
+            if (run == null) return null;
+            return buildSessionSummary(
+              sequence: seq,
+              run: run,
+              notifications: notifications,
+            );
+          } catch (e) {
+            debugPrint('[session-summary] run state for ${seq.id} failed: $e');
+            return null;
+          }
+        }),
+      )).whereType<SessionSummary>().toList();
       // The newest UNSEEN one: filter first, then pick, so a seen newer run
       // never hides an older end the user has not been told about.
       final ack = await _ack();
@@ -183,14 +181,12 @@ class SessionSummaryNotifier extends AsyncNotifier<SessionSummary?> {
 
   /// The user dismissed the card: never show this run IN THIS STATE again on
   /// this device (a resumed run that later fails is a new card).
-  Future<void> acknowledge(String runId) async {
-    final current = state.asData?.value;
-    final key = current?.runId == runId
-        ? current!.ackKey
-        : SessionSummary.ackKeyFor(runId, SequenceRunState.completed);
+  Future<void> acknowledge(SessionSummary summary) async {
     final ack = await _ack()
-      ..add(key);
-    if (ref.mounted && current?.runId == runId) {
+      ..add(summary.ackKey);
+    // Clear only the card being dismissed: a re-evaluation may have swapped
+    // in the same run in a later state, which is a different card.
+    if (ref.mounted && state.asData?.value?.ackKey == summary.ackKey) {
       state = const AsyncData(null);
     }
     await ref.read(sessionSummaryPrefsProvider).saveAcknowledged(ack);

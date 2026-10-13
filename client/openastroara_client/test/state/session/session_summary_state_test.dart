@@ -12,6 +12,7 @@ import 'package:openastroara/services/ws_event_stream.dart';
 import 'package:openastroara/state/notifications/notifications_state.dart';
 import 'package:openastroara/state/sequencer/sequence_list_state.dart';
 import 'package:openastroara/state/session/session_summary_state.dart';
+import 'package:openastroara/util/session_summary.dart';
 import 'package:openastroara/state/ws/ws_providers.dart';
 
 /// Only list() and getRunState matter here; the rest of the (large) interface
@@ -255,7 +256,9 @@ void main() {
     await c.read(sessionSummaryProvider.future);
     link.add(WsConnectionState.connected);
     await settle();
-    await c.read(sessionSummaryProvider.notifier).acknowledge('r1');
+    await c
+        .read(sessionSummaryProvider.notifier)
+        .acknowledge(c.read(sessionSummaryProvider).asData!.value!);
     expect(c.read(sessionSummaryProvider).asData?.value, isNull);
     expect(prefs.acked, contains('r1:completed'));
 
@@ -408,7 +411,9 @@ void main() {
       c.read(sessionSummaryProvider).asData?.value?.state,
       SequenceRunState.pausedAwaitingUser,
     );
-    await c.read(sessionSummaryProvider.notifier).acknowledge('r1');
+    await c
+        .read(sessionSummaryProvider.notifier)
+        .acknowledge(c.read(sessionSummaryProvider).asData!.value!);
     expect(prefs.acked, contains('r1:pausedAwaitingUser'));
 
     // The user resumes r1 and leaves; it fails at 03:00; the morning connect:
@@ -436,5 +441,77 @@ void main() {
       reason: 'the night\'s failure is a new card',
     );
     expect(s?.framesCaptured, 31);
+  });
+
+  test('acknowledging a card keys on THAT card, even when the provider has moved on', () async {
+    final c = make();
+    await c.read(sessionSummaryProvider.future);
+    link.add(WsConnectionState.connected);
+    await settle();
+    final shown = c.read(sessionSummaryProvider).asData!.value!;
+    // A re-evaluation swapped in nothing (or another run) before the user tapped.
+    final parked = SessionSummary(
+      sequenceId: 'seq-9',
+      runId: 'r9',
+      sequenceName: 'Other',
+      state: SequenceRunState.pausedAwaitingUser,
+      endedUtc: now,
+    );
+    await c.read(sessionSummaryProvider.notifier).acknowledge(parked);
+    expect(
+      prefs.acked,
+      contains('r9:pausedAwaitingUser'),
+      reason: 'not runId:completed',
+    );
+    expect(
+      c.read(sessionSummaryProvider).asData?.value?.runId,
+      shown.runId,
+      reason: 'a different card stays up',
+    );
+  });
+
+  test('a night on a sequence last edited weeks ago still gets its card (every ended run is read)', () async {
+    // Eight other sequences edited this morning, each with an old stopped run;
+    // the night's sequence was last edited weeks ago. A newest-edited-8 cut
+    // would never read seq-1.
+    final others = [
+      for (var i = 0; i < 8; i++)
+        SequenceListItem(
+          id: 'other-$i',
+          name: 'Other $i',
+          currentRunState: SequenceRunState.stopped,
+          modifiedUtc: now.subtract(Duration(minutes: i)),
+        ),
+    ];
+    final c = make(
+      list: [
+        ...others,
+        SequenceListItem(
+          id: 'seq-1',
+          name: 'M81 night',
+          currentRunState: SequenceRunState.completed,
+          modifiedUtc: start.subtract(const Duration(days: 21)),
+        ),
+      ],
+    );
+    for (var i = 0; i < 8; i++) {
+      api.byId['other-$i'] = SequenceRunStateInfo(
+        sequenceId: 'other-$i',
+        runId: 'o$i',
+        state: SequenceRunState.stopped,
+        startedUtc: start.subtract(const Duration(hours: 30)),
+        completedUtc: start.subtract(const Duration(hours: 26)),
+      );
+    }
+    await c.read(sessionSummaryProvider.future);
+    link.add(WsConnectionState.connected);
+    await settle();
+    expect(
+      api.reads,
+      9,
+      reason:
+          'all nine ended runs were read, not the eight most recently edited',
+    );
+    expect(c.read(sessionSummaryProvider).asData?.value?.runId, 'r1');
   });
 }
