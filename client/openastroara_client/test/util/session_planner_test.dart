@@ -10,6 +10,7 @@ TonightSkyObject obj(
   double score = 80,
   double hoursFree = 60,
   double? subS = 120,
+  double? budgetFullHours,
 }) =>
     TonightSkyObject(
       id: id,
@@ -25,9 +26,11 @@ TonightSkyObject obj(
       score: score,
       hoursFreeScore: hoursFree,
       optimalSubS: subS,
+      budgetFullHours: budgetFullHours,
     );
 
 void main() {
+  _tierHandshakeTests();
   _aimTests();
   _mosaicTests();
   _rotationTests();
@@ -347,5 +350,90 @@ void _swapTests() {
     // D never overlaps the slot — the plan is returned untouched.
     expect(swapPlanTarget(plan, 0, ranked[3]), same(plan));
     expect(swapPlanTarget(plan, 5, ranked[1]), same(plan));
+  });
+}
+
+/// §Integration Budget P5 — the planner handshake: closeness to completing a
+/// tier tonight wins the slot; a completed tier yields to a fresh target.
+void _tierHandshakeTests() {
+  final winStart = DateTime.utc(2026, 7, 18, 4);
+  final winEnd = DateTime.utc(2026, 7, 18, 7); // 3 h
+
+  test('P5: with equal scores, the target whose tier tonight\'s hours complete wins the single slot', () {
+    final nearlyDone = obj('near', winStart: winStart, winEnd: winEnd, budgetFullHours: 9);
+    final farOff = obj('far', winStart: winStart, winEnd: winEnd, budgetFullHours: 9);
+    final plan = planImagingSession(
+      ranked: [farOff, nearlyDone],
+      windowStartUtc: winStart,
+      windowEndUtc: winEnd,
+      bankedHours: const {'near': 7.0, 'far': 1.0},
+    );
+    expect(plan.targets.single.object.id, 'near', reason: '2 h to go fits the 3 h window');
+    expect(plan.notes, contains('near: this slice completes its full-structure tier.'));
+  });
+
+  test('P5: a target whose tier is already complete yields to a fresh one, and says so', () {
+    final done = obj('done', winStart: winStart, winEnd: winEnd, score: 90, hoursFree: 66, budgetFullHours: 9);
+    final fresh = obj('fresh', winStart: winStart, winEnd: winEnd, score: 85, hoursFree: 62);
+    final plain = planImagingSession(ranked: [done, fresh], windowStartUtc: winStart, windowEndUtc: winEnd);
+    expect(plain.targets.single.object.id, 'done', reason: 'without the library, the higher score wins');
+
+    final informed = planImagingSession(
+      ranked: [done, fresh],
+      windowStartUtc: winStart,
+      windowEndUtc: winEnd,
+      bankedHours: const {'done': 9.5},
+    );
+    expect(informed.targets.single.object.id, 'fresh', reason: 'diminishing returns steer to the new object');
+
+    final forced = planImagingSession(
+      ranked: [done],
+      windowStartUtc: winStart,
+      windowEndUtc: winEnd,
+      bankedHours: const {'done': 9.5},
+    );
+    expect(forced.notes.single, contains('full-structure tier already complete — diminishing returns'));
+  });
+
+  test('P5: completion is judged on integration, not the clock span', () {
+    // 2 h to go. A 2 h slice with 120 s subs at the default overheads integrates ~1.7 h: not complete.
+    final near = obj('near', winStart: winStart, winEnd: winStart.add(const Duration(hours: 2)), budgetFullHours: 9);
+    final plan = planImagingSession(
+      ranked: [near],
+      windowStartUtc: winStart,
+      windowEndUtc: winStart.add(const Duration(hours: 2)),
+      bankedHours: const {'near': 7.0},
+    );
+    final slice = plan.targets.single;
+    expect(slice.hours, closeTo(2.0, 1e-9));
+    expect(slice.subCount! * slice.subSeconds! / 3600, lessThan(2.0));
+    expect(plan.notes, isEmpty, reason: 'about 16 min of integration short of the tier');
+
+    // The same slice with no sub figure falls back to the clock span and does complete.
+    final clockOnly = obj('clock', winStart: winStart, winEnd: winStart.add(const Duration(hours: 2)), budgetFullHours: 9, subS: null);
+    final plan2 = planImagingSession(
+      ranked: [clockOnly],
+      windowStartUtc: winStart,
+      windowEndUtc: winStart.add(const Duration(hours: 2)),
+      bankedHours: const {'clock': 7.0},
+    );
+    expect(plan2.notes.single, 'clock: this slice completes its full-structure tier.');
+  });
+
+  test('P5: a swapped-in target gets its own tier note', () {
+    final a = obj('a', winStart: winStart, winEnd: winEnd);
+    final done = obj('done', winStart: winStart, winEnd: winEnd, budgetFullHours: 9);
+    final plan = planImagingSession(ranked: [a, done], windowStartUtc: winStart, windowEndUtc: winEnd);
+    final swapped = swapPlanTarget(plan, 0, done, bankedHours: const {'done': 9.5});
+    expect(swapped.targets.single.object.id, 'done');
+    expect(swapped.notes.single, contains('tier already complete'));
+  });
+
+  test('P5: no budget or nothing banked leaves the value function untouched', () {
+    final a = obj('a', winStart: winStart, winEnd: winEnd, score: 80);
+    final b = obj('b', winStart: winStart, winEnd: winEnd, score: 80, hoursFree: 61);
+    final plan = planImagingSession(ranked: [a, b], windowStartUtc: winStart, windowEndUtc: winEnd, bankedHours: const {'a': 5});
+    expect(plan.targets.single.object.id, 'b');
+    expect(plan.notes, isEmpty);
   });
 }
