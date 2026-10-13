@@ -1,5 +1,8 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../models/server.dart';
+import 'saved_server_state.dart';
+
 /// §30.1 launch-sequence gate — false until the user clicks [Image] on the
 /// launch profile box, at which point the root router swaps in the main shell.
 ///
@@ -58,3 +61,38 @@ class ServerChooserRequestNotifier extends Notifier<bool> {
 
   void clear() => state = false;
 }
+
+/// #1137 — should a server change mid-session send the user back through the
+/// launch flow? Yes when the shell is up against a server and the ACTIVE server
+/// becomes a different one (host or port): the profile box, the cache seed and
+/// the gear hydration all belong to the old rig. A first server appearing, a
+/// server disappearing (offline planning keeps the shell), or the same server
+/// re-saved are not switches.
+bool shouldRearmLaunchGate({
+  required ({String hostname, int port})? previous,
+  required ({String hostname, int port})? next,
+  required bool gatePassed,
+  required bool offline,
+}) {
+  if (!gatePassed || offline) return false;
+  if (previous == null || next == null) return false;
+  return previous.hostname != next.hostname || previous.port != next.port;
+}
+
+/// #1137 — root-mounted (`main.dart` keeps it alive with a listen): a different
+/// ACTIVE server mid-session re-arms the launch gate so the user goes back
+/// through the launch flow instead of planning against the old rig's gear.
+/// The decision itself is [shouldRearmLaunchGate]; this provider only wires it
+/// to the live server list so it can be tested with a bare container.
+final launchGateRearmProvider = Provider<void>((ref) {
+  ref.listen<AraServer?>(activeServerProvider, (previous, next) {
+    if (shouldRearmLaunchGate(
+      previous: previous == null ? null : (hostname: previous.hostname, port: previous.port),
+      next: next == null ? null : (hostname: next.hostname, port: next.port),
+      gatePassed: ref.read(profileGatePassedProvider),
+      offline: ref.read(offlineModeProvider),
+    )) {
+      ref.read(profileGatePassedProvider.notifier).reset();
+    }
+  });
+});

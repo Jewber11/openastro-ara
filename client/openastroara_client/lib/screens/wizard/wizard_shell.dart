@@ -2,11 +2,14 @@ import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../models/profile_draft.dart';
 import '../../models/server.dart';
+import '../../services/pending_profile_draft_service.dart';
 import '../../services/profile_api.dart';
 import '../../state/guider/guider_build_activity_state.dart';
 import '../../state/guider/guider_calibration_state.dart';
 import '../../state/guider/guider_equipment_state.dart';
+import '../../state/pending_profile_drafts_state.dart';
 import '../../state/profile_management_state.dart';
 import '../../state/saved_server_state.dart';
 import '../../state/wizard_state.dart';
@@ -122,8 +125,13 @@ class _WizardShellState extends ConsumerState<WizardShell> {
 
     final server = ref.read(activeServerProvider);
     if (server == null) {
-      _showError(messenger, 'Connect to your rig before saving this profile.');
-      return; // keep the wizard open; nothing to save against
+      // §2 / #1137 — no rig in reach: keep the profile on this device and
+      // apply it the moment a server connects (pending_profile_drafts_state).
+      // The guard covers the file write: a second tap must not store a second
+      // draft that the replay would turn into two profiles.
+      setState(() => _isSaving = true);
+      await _saveLocallyGuarded(draft, server: null, finalSave: finalSave, nav: nav, messenger: messenger);
+      return;
     }
     final api = (widget.createApi ?? ProfileApi.new)(server);
 
@@ -151,9 +159,25 @@ class _WizardShellState extends ConsumerState<WizardShell> {
     String? error;
     try {
       await saveWizardProfile(api, draft);
+    } on ProfileSaveTransportFailure {
+      // #1137 — the profile may already exist on this server (savedProfileId):
+      // keep the draft pinned to it and replay the sections on reconnect.
+      if (nav.mounted) nav.pop(); // the spinner
+      // _isSaving stays set until the file write is done: a second tap while
+      // the wizard is still open must not start another network save.
+      await _saveLocallyGuarded(draft, server: server, finalSave: finalSave, nav: nav, messenger: messenger);
+      return;
     } on DioException catch (e) {
+      if (e.response == null) {
+        // #1137 — the daemon never answered (down, out of Wi-Fi range): a
+        // transport failure, not a rejection. Keep the draft on this device
+        // and replay it on reconnect, exactly like the no-server path.
+        if (nav.mounted) nav.pop(); // the spinner
+        await _saveLocallyGuarded(draft, server: server, finalSave: finalSave, nav: nav, messenger: messenger);
+        return;
+      }
       error = 'Couldn\'t save the profile: ${e.message ?? 'network error'} '
-          '(${e.response?.statusCode ?? 'no response'}).';
+          '(${e.response!.statusCode}).';
     } catch (e) {
       // Keep the raw detail in the logs; show the user a clean message (no
       // "Exception:" prefix / internal section text) — Save is retryable.
@@ -272,6 +296,65 @@ class _WizardShellState extends ConsumerState<WizardShell> {
         duration: const Duration(seconds: 8),
       ));
     }
+    widget.onComplete?.call(ProfileDraftSnapshot(draft));
+  }
+
+  /// §2 / #1137 — persist the draft as a pending profile on this device and
+  /// leave the wizard; `pendingProfileDraftReplayProvider` applies it when a
+  /// server connects. A persist failure keeps the wizard open with an error.
+  /// [_saveLocally] with the double-tap guard held until the file write is
+  /// done (the caller set `_isSaving`); released even when the write throws.
+  Future<void> _saveLocallyGuarded(
+    ProfileDraft draft, {
+    required AraServer? server,
+    required bool finalSave,
+    required NavigatorState nav,
+    required ScaffoldMessengerState messenger,
+  }) async {
+    try {
+      await _saveLocally(draft, server: server, finalSave: finalSave, nav: nav, messenger: messenger);
+    } finally {
+      if (mounted) {
+        setState(() => _isSaving = false);
+      } else {
+        _isSaving = false;
+      }
+    }
+  }
+
+  Future<void> _saveLocally(
+    ProfileDraft draft, {
+    required AraServer? server,
+    required bool finalSave,
+    required NavigatorState nav,
+    required ScaffoldMessengerState messenger,
+  }) async {
+    final name = (draft.profileName?.trim().isNotEmpty ?? false)
+        ? draft.profileName!.trim()
+        : 'Untitled profile';
+    try {
+      final store = ref.read(pendingProfileDraftServiceProvider);
+      await ref.read(pendingProfileDraftsProvider.notifier).add(PendingProfileDraft(
+        id: store.newId(),
+        name: name,
+        savedUtc: DateTime.now().toUtc(),
+        draft: draft,
+        finalSave: finalSave,
+        // A save that broke off partway created the profile on THIS server
+        // (savedProfileId); the replay must go back to it, not to the next rig.
+        serverKey: server == null ? null : pendingDraftServerKey(server),
+      ));
+    } catch (e) {
+      debugPrint('[wizard] local profile save failed: $e');
+      _showError(messenger, 'Couldn\'t save the profile on this device. Please try again.');
+      return;
+    }
+    if (nav.mounted) nav.pop(); // exit the wizard
+    messenger.showSnackBar(SnackBar(
+      content: Text('"$name" is saved on this device. It will be applied to your rig '
+          'the next time you connect.'),
+      duration: const Duration(seconds: 6),
+    ));
     widget.onComplete?.call(ProfileDraftSnapshot(draft));
   }
 
