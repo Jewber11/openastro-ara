@@ -499,6 +499,17 @@ class _CompactToolButton extends StatelessWidget {
 /// toolbar and the tab pass `ref.read`.
 typedef ProviderReader = T Function<T>(ProviderListenable<T> provider);
 
+/// The lifecycle gate the Run tab's keys and the ⌘K palette share (#1170):
+/// a saved, non-draft sequence selected on a connected rig with no command
+/// in flight.
+bool lifecycleArmed(ProviderReader read) {
+  final id = read(selectedSequenceIdProvider);
+  return read(sequenceApiProvider) != null &&
+      id != null &&
+      !isDraftSequenceId(id) &&
+      !read(sequenceCommandBusyProvider);
+}
+
 /// Start the selected sequence, with the soft pre-flight gate (§25 flow
 /// redesign): when polar alignment hasn't reached the green zone this
 /// session, confirm before starting — the gate SUGGESTS, it never blocks

@@ -5,20 +5,24 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../help/registry.dart';
-import '../models/sequence/draft_sequence.dart';
 import '../models/sequence/sequence_summary.dart';
 import '../screens/calibration/calibration_screen.dart';
 import '../screens/library/image_library_screen.dart';
 import '../screens/stats/stats_dashboard_screen.dart';
 import '../screens/wizard/wizard_shell.dart';
 import '../state/app_shell_state.dart';
+import '../state/equipment/camera_state.dart';
+import '../state/equipment/mount_state.dart';
 import '../state/sequencer/sequence_list_state.dart';
 import '../state/settings/settings_nav.dart';
 import '../state/settings/settings_search.dart';
+import '../state/sky_atlas/sky_atlas_state.dart';
+import '../state/sky_atlas/tonight_sky_state.dart';
 import '../theme/ara_colors.dart';
 import 'backup/backup_restore_modal.dart';
 import 'help_icon.dart';
 import 'notifications/notification_center.dart';
+import 'sequencer/sequence_new_dialog.dart';
 import 'sequencer/sequencer_toolbar.dart';
 import 'sky_atlas/session_plan_dialog.dart';
 
@@ -49,7 +53,7 @@ class _CommandPaletteDialog extends ConsumerStatefulWidget {
 class _CommandPaletteDialogState extends ConsumerState<_CommandPaletteDialog> {
   late final TextEditingController _controller;
   late final FocusNode _searchFocus;
-  late final List<SettingsSearchEntry> _index;
+  List<SettingsSearchEntry> _index = const <SettingsSearchEntry>[];
   List<SettingsSearchEntry> _results = const <SettingsSearchEntry>[];
   int _selectedIndex = 0;
 
@@ -58,8 +62,22 @@ class _CommandPaletteDialogState extends ConsumerState<_CommandPaletteDialog> {
     super.initState();
     _controller = TextEditingController();
     _searchFocus = FocusNode();
-    _index = buildSearchIndex();
+    _rebuildIndex();
   }
+  // #1170 — the index carries what the daemon offers right now (templates,
+  // tonight's targets). Both are async; a still-loading list just contributes
+  // nothing until build() sees it land and rebuilds the index.
+  void _rebuildIndex() {
+    final templates = ref.read(sequenceTemplatesProvider).asData?.value ?? const [];
+    final targets = ref.read(tonightSkyProvider).asData?.value ?? const [];
+    _index = buildSearchIndex(
+      templateNames: templates.map((t) => t.name),
+      targets: targets.map((o) => (o.id, o.name, o.type)),
+    );
+    _results = searchSettings(_index, _controller.text);
+    _selectedIndex = _selectedIndex.clamp(0, _results.isEmpty ? 0 : _results.length - 1);
+  }
+
 
   @override
   void dispose() {
@@ -129,12 +147,8 @@ class _CommandPaletteDialogState extends ConsumerState<_CommandPaletteDialog> {
   /// The Run tab's lifecycle-key gate (a saved, non-draft sequence selected
   /// on a connected rig, no command in flight), with a sentence where the
   /// keys stay silent — ⌘K has no toolbar in view to explain itself.
-  static bool _runArmed(BuildContext rootContext, ProviderContainer ref) {
-    final id = ref.read(selectedSequenceIdProvider);
-    final armed = ref.read(sequenceApiProvider) != null &&
-        id != null &&
-        !isDraftSequenceId(id) &&
-        !ref.read(sequenceCommandBusyProvider);
+  static bool _runArmed(BuildContext rootContext, ProviderContainer container) {
+    final armed = lifecycleArmed(container.read);
     if (!armed) {
       ScaffoldMessenger.maybeOf(rootContext)?.showSnackBar(
         const SnackBar(content: Text('Select a saved sequence on a connected rig first.')),
@@ -148,12 +162,12 @@ class _CommandPaletteDialogState extends ConsumerState<_CommandPaletteDialog> {
   /// wait for the value before branching (r2 note). A failed load branches on
   /// null, which the helpers treat as "not running".
   static Future<void> _withRunState(
-      ProviderContainer ref, Future<void> Function(SequenceRunState? state) then) async {
-    final sub = ref.listen(sequenceRunStateProvider, (_, _) {});
+      ProviderContainer container, Future<void> Function(SequenceRunState? state) then) async {
+    final sub = container.listen(sequenceRunStateProvider, (_, _) {});
     try {
       SequenceRunState? state;
       try {
-        state = (await ref.read(sequenceRunStateProvider.future))?.state;
+        state = (await container.read(sequenceRunStateProvider.future))?.state;
       } catch (_) {
         state = null;
       }
@@ -169,30 +183,74 @@ class _CommandPaletteDialogState extends ConsumerState<_CommandPaletteDialog> {
   // top-bar buttons in app_shell.dart — same routes, same dialog. The run
   // actions (#1154) go through the Run tab's own helpers, so ⌘K and the key
   // shortcuts take exactly one path to the daemon.
-  static void _runAction(BuildContext rootContext, ProviderContainer ref, String actionId) {
+  static void _runAction(BuildContext rootContext, ProviderContainer container, String actionId) {
+    if (actionId.startsWith(templateActionPrefix)) {
+      final templateName = actionId.substring(templateActionPrefix.length);
+      final now = DateTime.now();
+      String two(int n) => n.toString().padLeft(2, '0');
+      container.read(selectedTabIndexProvider.notifier).select(kRunTabIndex);
+      createSequenceFromTemplate(rootContext, container,
+          templateName: templateName,
+          newName: '$templateName ${now.year}-${two(now.month)}-${two(now.day)}');
+      return;
+    }
+    if (actionId.startsWith(gotoActionPrefix)) {
+      final id = actionId.substring(gotoActionPrefix.length);
+      final target = (container.read(tonightSkyProvider).asData?.value ?? const []).where((o) => o.id == id).firstOrNull;
+      if (target == null) return; // the list moved on since the palette opened
+      container.read(selectedTabIndexProvider.notifier).select(kPlanningTabIndex);
+      // The selection provider auto-disposes with no listener; the Planning
+      // tab subscribes on its first frame, so select once that frame is up.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        container.read(selectedTonightObjectProvider.notifier).select(target.id);
+        container.read(planetariumCommandProvider.notifier).send({
+          'type': 'goto',
+          'ra': target.raDeg,
+          'dec': target.decDeg,
+          'name': target.name,
+        });
+      });
+      return;
+    }
     switch (actionId) {
+      case 'action.mount.park':
+        _equipmentOp(rootContext, 'park the mount', () => container.read(mountProvider.notifier).park());
+      case 'action.mount.unpark':
+        _equipmentOp(rootContext, 'unpark the mount', () => container.read(mountProvider.notifier).unpark());
+      case 'action.mount.home':
+        _equipmentOp(rootContext, 'find the mount\'s home', () => container.read(mountProvider.notifier).findHome());
+      case 'action.mount.tracking_on':
+        _equipmentOp(rootContext, 'start tracking', () => container.read(mountProvider.notifier).setTracking(true));
+      case 'action.mount.tracking_off':
+        _equipmentOp(rootContext, 'stop tracking', () => container.read(mountProvider.notifier).setTracking(false));
+      case 'action.camera.cooler_off':
+        _equipmentOp(rootContext, 'switch the cooler off', () => container.read(cameraStatusProvider.notifier).setCooler(false));
       case 'action.run.start':
-        ref.read(selectedTabIndexProvider.notifier).select(kRunTabIndex);
-        if (!_runArmed(rootContext, ref)) return;
-        unawaited(_withRunState(ref, (state) async {
+        container.read(selectedTabIndexProvider.notifier).select(kRunTabIndex);
+        if (!_runArmed(rootContext, container)) return;
+        unawaited(_withRunState(container, (state) async {
           if (state?.isAnyPaused ?? false) {
-            await promptAndResumeSequence(rootContext, ref.read);
+            await promptAndResumeSequence(rootContext, container.read);
+          } else if (_settling(state)) {
+            _say(rootContext, 'The sequence is ${state!.name} — wait for it to settle.');
           } else if (state?.isActive ?? false) {
             ScaffoldMessenger.maybeOf(rootContext)?.showSnackBar(
               const SnackBar(content: Text('The sequence is already running — Space pauses it.')),
             );
           } else {
-            await preflightAndRunSequence(rootContext, ref.read);
+            await preflightAndRunSequence(rootContext, container.read);
           }
         }));
       case 'action.run.pause':
-        ref.read(selectedTabIndexProvider.notifier).select(kRunTabIndex);
-        if (!_runArmed(rootContext, ref)) return;
-        unawaited(_withRunState(ref, (state) async {
+        container.read(selectedTabIndexProvider.notifier).select(kRunTabIndex);
+        if (!_runArmed(rootContext, container)) return;
+        unawaited(_withRunState(container, (state) async {
           if (state == SequenceRunState.running) {
-            await runSequenceLifecycle(rootContext, ref.read, (api, id) => api.pause(id));
+            await runSequenceLifecycle(rootContext, container.read, (api, id) => api.pause(id));
           } else if (state?.isAnyPaused ?? false) {
-            await promptAndResumeSequence(rootContext, ref.read);
+            await promptAndResumeSequence(rootContext, container.read);
+          } else if (_settling(state)) {
+            _say(rootContext, 'The sequence is ${state!.name} — wait for it to settle.');
           } else {
             ScaffoldMessenger.maybeOf(rootContext)?.showSnackBar(
               const SnackBar(content: Text('No sequence is running — ⌘R starts the selected one.')),
@@ -200,7 +258,7 @@ class _CommandPaletteDialogState extends ConsumerState<_CommandPaletteDialog> {
           }
         }));
       case 'action.plan.tonight':
-        ref.read(selectedTabIndexProvider.notifier).select(kPlanningTabIndex);
+        container.read(selectedTabIndexProvider.notifier).select(kPlanningTabIndex);
         showDialog<void>(
           context: rootContext,
           builder: (_) => const SessionPlanDialog(),
@@ -238,8 +296,32 @@ class _CommandPaletteDialogState extends ConsumerState<_CommandPaletteDialog> {
     }
   }
 
+  /// `starting` and `aborting` pass in a moment; neither key does anything
+  /// then, so the palette says to wait instead of pointing at a key.
+  static bool _settling(SequenceRunState? s) =>
+      s == SequenceRunState.starting || s == SequenceRunState.aborting;
+
+  static void _say(BuildContext rootContext, String text) =>
+      ScaffoldMessenger.maybeOf(rootContext)?.showSnackBar(SnackBar(content: Text(text)));
+
+  static void _equipmentOp(BuildContext rootContext, String what, Future<bool> Function() op) {
+    final messenger = ScaffoldMessenger.maybeOf(rootContext); // grabbed before the await
+    op().then((performed) {
+      if (!performed) {
+        // false covers both the fence (another command still in flight) and no device.
+        messenger?.showSnackBar(SnackBar(content: Text('Could not $what — the device is not connected, or busy with another command.')));
+      }
+    }, onError: (Object e) {
+      messenger?.showSnackBar(SnackBar(content: Text('Could not $what: $e')));
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
+    // #1170 — templates and tonight's targets land asynchronously: when either
+    // resolves while the palette is open, the index picks them up.
+    ref.listen(sequenceTemplatesProvider, (_, _) => setState(_rebuildIndex));
+    ref.listen(tonightSkyProvider, (_, _) => setState(_rebuildIndex));
     return Dialog(
       alignment: Alignment.topCenter,
       insetPadding: const EdgeInsets.only(top: 80, left: 24, right: 24),

@@ -58,7 +58,7 @@ class _SequenceNewDialogState extends ConsumerState<SequenceNewDialog> {
     setState(() => _busy = true);
     var created = false;
     try {
-      final id = await createSequenceFromTemplate(context, ref,
+      final id = await createSequenceFromTemplate(context, ProviderScope.containerOf(context),
           templateName: templateName, newName: newName);
       // Gate on this State's `mounted`, not navigator.mounted: the dialog is
       // barrierDismissible, so it can be tapped away mid-create. Once the dialog
@@ -195,11 +195,13 @@ class _SequenceNewDialogState extends ConsumerState<SequenceNewDialog> {
 /// Mirrors the import flow's mounted/ref ordering.
 Future<String?> createSequenceFromTemplate(
   BuildContext context,
-  WidgetRef ref, {
+  // A container, not a WidgetRef: the ⌘K palette calls this after popping
+  // itself (#1170), and a WidgetRef dies with its widget.
+  ProviderContainer container, {
   required String templateName,
   required String newName,
 }) async {
-  final api = ref.read(sequenceApiProvider);
+  final api = container.read(sequenceApiProvider);
   if (api == null) {
     // The New button is gated on `connected`, so this shouldn't be reachable;
     // log it (rather than silently no-op) in case that gating ever regresses.
@@ -226,13 +228,13 @@ Future<String?> createSequenceFromTemplate(
     return null;
   }
 
-  // Check mounted BEFORE touching ref: the sequence exists server-side now, but
-  // if the widget was disposed during the await, ref.invalidate/ref.read would
-  // throw on a defunct Ref. Return null (not the id): nothing was surfaced or
-  // selected, so the caller shouldn't treat it as a success to pop on.
+  // Check mounted BEFORE selecting: the sequence exists server-side now, but
+  // if the screen went away during the await there is nothing to show it in.
+  // Return null (not the id): nothing was surfaced or selected, so the caller
+  // shouldn't treat it as a success to pop on.
   if (!context.mounted) return null;
-  ref.invalidate(sequenceListProvider);
-  ref.read(selectedSequenceIdProvider.notifier).select(id);
+  container.invalidate(sequenceListProvider);
+  container.read(selectedSequenceIdProvider.notifier).select(id);
   messenger.showSnackBar(SnackBar(content: Text('Created "$name".')));
   return id;
 }

@@ -118,7 +118,7 @@ void main() {
     test('every action id is unique and prefixed action.', () {
       final index = buildSearchIndex();
       final actions = index.where((e) => e.actionId != null).toList();
-      expect(actions, hasLength(9));
+      expect(actions, hasLength(15));
       expect(actions.map((e) => e.id).toSet().length, actions.length);
       expect(actions.map((e) => e.id), everyElement(startsWith('action.')));
     });
@@ -145,5 +145,26 @@ void main() {
     expect(searchSettings(index, 'cmd r', limit: 5).map((e) => e.actionId), contains('action.run.start'));
     expect(searchSettings(index, 'space', limit: 5).map((e) => e.actionId), contains('action.run.pause'));
     expect(searchSettings(index, 'plan tonight', limit: 5).first.actionId, 'action.plan.tonight');
+  });
+
+  test('#1170 equipment operations are palette actions', () {
+    final index = buildSearchIndex();
+    expect(searchSettings(index, 'park', limit: 10).map((e) => e.actionId), contains('action.mount.park'));
+    expect(searchSettings(index, 'warm up', limit: 10).map((e) => e.actionId), contains('action.camera.cooler_off'));
+    expect(searchSettings(index, 'tracking', limit: 10).map((e) => e.actionId),
+        containsAll(['action.mount.tracking_on', 'action.mount.tracking_off']));
+  });
+
+  test('#1170 templates and tonight\'s targets become entries when the palette is given them', () {
+    final index = buildSearchIndex(
+      templateNames: ['Deep Sky LRGB', 'Narrowband SHO'],
+      targets: [('M31', 'Andromeda Galaxy', 'galaxy'), ('NGC7000', 'North America Nebula', 'HII')],
+    );
+    expect(searchSettings(index, 'lrgb', limit: 5).first.actionId, '${templateActionPrefix}Deep Sky LRGB');
+    expect(searchSettings(index, 'andromeda', limit: 5).first.actionId, '${gotoActionPrefix}M31');
+    expect(searchSettings(index, 'andromeda', limit: 5).first.label, 'Go to Andromeda Galaxy');
+    expect(searchSettings(index, 'north america', limit: 5).first.description, 'HII');
+    expect(buildSearchIndex().where((e) => e.actionId?.startsWith(gotoActionPrefix) ?? false), isEmpty,
+        reason: 'nothing dynamic without data');
   });
 }

@@ -308,13 +308,7 @@ class _SequencerTabState extends ConsumerState<SequencerTab> {
 
   /// The toolbar buttons' gate, for the lifecycle keys: a real (non-draft)
   /// sequence selected on a connected daemon with no command in flight.
-  bool get _lifecycleKeysArmed {
-    final id = ref.read(selectedSequenceIdProvider);
-    return ref.read(sequenceApiProvider) != null &&
-        id != null &&
-        !isDraftSequenceId(id) &&
-        !ref.read(sequenceCommandBusyProvider);
-  }
+  bool get _lifecycleKeysArmed => lifecycleArmed(ref.read);
 
   /// ⌘R — Run when idle/finished, Resume when paused. Mirrors the toolbar's
   /// canRunOrResume gate exactly; a mid-run press is a silent no-op.

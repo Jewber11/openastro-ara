@@ -6,6 +6,20 @@ import 'package:openastroara/services/saved_server_service.dart';
 import 'package:openastroara/state/saved_server_state.dart';
 import 'package:openastroara/widgets/command_palette.dart';
 import 'package:openastroara/widgets/sky_atlas/session_plan_dialog.dart';
+import 'package:openastroara/models/camera_status.dart';
+import 'package:openastroara/models/discovered_device.dart';
+import 'package:openastroara/models/switch_device.dart';
+import 'package:openastroara/models/mount_status.dart';
+import 'package:openastroara/services/equipment_device_api.dart';
+import 'package:openastroara/services/tonight_sky_api.dart';
+import 'package:openastroara/state/app_shell_state.dart';
+import 'package:openastroara/state/ws/ws_providers.dart';
+import 'package:openastroara/state/equipment/camera_state.dart';
+import 'package:openastroara/state/equipment/mount_state.dart';
+import 'package:openastroara/state/equipment/switch_state.dart';
+import 'package:openastroara/state/settings/settings_nav.dart';
+import 'package:openastroara/state/sky_atlas/sky_atlas_state.dart';
+import 'package:openastroara/state/sky_atlas/tonight_sky_state.dart';
 import 'package:openastroara/models/sequence/sequence_summary.dart';
 import 'package:openastroara/services/sequence_api.dart';
 import 'package:openastroara/state/sequencer/sequence_list_state.dart';
@@ -87,6 +101,108 @@ Future<void> _pick(WidgetTester tester, String query, String label) async {
   await tester.pump();
   await tester.tap(find.text(label));
   await tester.pumpAndSettle();
+}
+
+class _FakeMountApi implements EquipmentDeviceClient<MountStatus> {
+  final List<String> commands = [];
+  @override
+  Future<void> forget() async {}
+  @override
+  Future<MountStatus?> getStatus() async => null;
+  @override
+  Future<void> connect(DiscoveredDevice device) async {}
+  @override
+  Future<void> disconnect() async {}
+  @override
+  Future<void> command(String subpath, [Map<String, dynamic>? body]) async {
+    if (throwOnCommand) throw Exception('mount offline');
+    commands.add(body == null ? subpath : '$subpath $body');
+  }
+  bool throwOnCommand = false;
+  @override
+  void close() {}
+}
+
+class _FakeCameraApi implements EquipmentDeviceClient<CameraStatus> {
+  final List<String> commands = [];
+  @override
+  Future<void> forget() async {}
+  @override
+  Future<CameraStatus?> getStatus() async => null;
+  @override
+  Future<void> connect(DiscoveredDevice device) async {}
+  @override
+  Future<void> disconnect() async {}
+  @override
+  Future<void> command(String subpath, [Map<String, dynamic>? body]) async => commands.add('$subpath $body');
+  @override
+  void close() {}
+}
+
+class _NoSwitches extends SwitchListNotifier {
+  @override
+  Future<List<SwitchDevice>> build() async => const [];
+}
+
+/// A palette over a rig with fake mount and camera clients ([connected] false
+/// = no active server, so every notifier action returns false).
+Future<(ProviderContainer, _FakeMountApi, _FakeCameraApi)> _pumpEquipmentPalette(WidgetTester tester,
+    {bool connected = true, bool mountThrows = false}) async {
+  final mountApi = _FakeMountApi()..throwOnCommand = mountThrows;
+  final cameraApi = _FakeCameraApi();
+  final container = await _pumpPalette(tester, [
+    if (connected) activeServerProvider.overrideWithValue(const AraServer(hostname: 'rig', port: 1)),
+    mountApiFactoryProvider.overrideWithValue((_) => mountApi),
+    cameraStatusApiFactoryProvider.overrideWithValue((_) => cameraApi),
+    switchListProvider.overrideWith(_NoSwitches.new),
+    wsEventsProvider.overrideWith((ref) => const Stream.empty()),
+  ]);
+  return (container, mountApi, cameraApi);
+}
+
+class _FakeSeqClient implements SequenceClient {
+  final List<String> created = [];
+  @override
+  Future<String> instantiateTemplate(String templateName, String newName) async {
+    created.add('$templateName → $newName');
+    return 'seq-new';
+  }
+  @override
+  Future<List<SequenceTemplate>> listTemplates() async =>
+      const [SequenceTemplate(name: 'Deep Sky LRGB', category: 'Imaging', description: null, isBuiltIn: true)];
+  @override
+  void close() {}
+  @override
+  dynamic noSuchMethod(Invocation invocation) => throw UnimplementedError('${invocation.memberName}');
+}
+
+final _m31 = TonightSkyObject(
+  id: 'M31', name: 'Andromeda Galaxy', type: 'galaxy', magnitude: 3.4, raDeg: 10.68, decDeg: 41.27,
+  altitudeDeg: 55, maxAltitudeDeg: 60, windowStartUtc: DateTime.utc(2026, 10, 13, 20), windowEndUtc: DateTime.utc(2026, 10, 14, 4),
+  score: 90, hoursFreeScore: 60,
+);
+
+Future<ProviderContainer> _pumpPalette(WidgetTester tester, List<Object> extra) async {
+  final container = ProviderContainer(overrides: [
+    savedServerServiceProvider.overrideWithValue(_FakeSavedServerService()),
+    ...extra,
+  ].cast());
+  addTearDown(container.dispose);
+  await tester.pumpWidget(UncontrolledProviderScope(
+    container: container,
+    child: MaterialApp(
+      home: Scaffold(
+        body: Builder(
+          builder: (context) => Center(
+            child: ElevatedButton(onPressed: () => showCommandPalette(context), child: const Text('open')),
+          ),
+        ),
+      ),
+    ),
+  ));
+  await tester.tap(find.text('open'));
+  await tester.pumpAndSettle();
+  return container;
 }
 
 void main() {
@@ -229,6 +345,22 @@ void main() {
       expect(client.calls, ['resume seq-1 recenter=false refocus=false']);
     });
 
+    for (final (state, query, label) in const [
+      (SequenceRunState.starting, 'run or resume', 'Run or resume the sequence (⌘R)'),
+      (SequenceRunState.aborting, 'run or resume', 'Run or resume the sequence (⌘R)'),
+      (SequenceRunState.starting, 'pause', 'Pause or resume the sequence (Space)'),
+      (SequenceRunState.aborting, 'pause', 'Pause or resume the sequence (Space)'),
+    ]) {
+      testWidgets('while ${state.name}, "$label" says to wait (neither key would act)', (tester) async {
+        final (_, client) = await _pumpRunPalette(tester, state);
+        await _pick(tester, query, label);
+        expect(find.textContaining('wait for it to settle'), findsOneWidget);
+        expect(find.textContaining('already running'), findsNothing);
+        expect(find.textContaining('No sequence is running'), findsNothing);
+        expect(client.calls, isEmpty);
+      });
+    }
+
     testWidgets('Pause while running pauses', (tester) async {
       final (_, client) = await _pumpRunPalette(tester, SequenceRunState.running);
       await _pick(tester, 'pause', 'Pause or resume the sequence (Space)');
@@ -248,5 +380,76 @@ void main() {
       expect(find.text('Select a saved sequence on a connected rig first.'), findsOneWidget);
       expect(client.calls, isEmpty);
     });
+  });
+  group('#1170 equipment actions go through the chips\' notifiers', () {
+    const cases = <(String query, String label, String mountCommand)>[
+      ('park the mount', 'Park the mount', 'park'),
+      ('unpark', 'Unpark the mount', 'unpark'),
+      ('home position', "Find the mount's home position", 'home'),
+      ('start tracking', 'Start tracking', 'tracking {enabled: true}'),
+      ('stop tracking', 'Stop tracking', 'tracking {enabled: false}'),
+    ];
+    for (final (query, label, command) in cases) {
+      testWidgets('"$label" sends $command', (tester) async {
+        final (_, mountApi, cameraApi) = await _pumpEquipmentPalette(tester);
+        await _pick(tester, query, label);
+        expect(mountApi.commands, [command]);
+        expect(cameraApi.commands, isEmpty);
+      });
+    }
+
+    testWidgets('"Switch the camera cooler off" sends cooler enabled=false', (tester) async {
+      final (_, mountApi, cameraApi) = await _pumpEquipmentPalette(tester);
+      await _pick(tester, 'cooler off', 'Switch the camera cooler off');
+      expect(cameraApi.commands, ['cooler {enabled: false, target_temperature_c: null}']);
+      expect(mountApi.commands, isEmpty);
+    });
+
+    testWidgets('with no rig connected the notifier does nothing and the palette says so', (tester) async {
+      final (_, mountApi, _) = await _pumpEquipmentPalette(tester, connected: false);
+      await _pick(tester, 'park the mount', 'Park the mount');
+      expect(mountApi.commands, isEmpty);
+      expect(find.textContaining('Could not park the mount — the device is not connected'), findsOneWidget);
+    });
+
+    testWidgets('a failing command is reported with its error', (tester) async {
+      final (_, mountApi, _) = await _pumpEquipmentPalette(tester, mountThrows: true);
+      await _pick(tester, 'park the mount', 'Park the mount');
+      expect(mountApi.commands, isEmpty);
+      expect(find.textContaining('Could not park the mount: '), findsOneWidget);
+      expect(find.textContaining('mount offline'), findsOneWidget);
+    });
+  });
+
+  testWidgets('#1170 a daemon template is a "New sequence from template" entry that creates and selects the run', (tester) async {
+    final seq = _FakeSeqClient();
+    final container = await _pumpPalette(tester, [sequenceApiProvider.overrideWithValue(seq)]);
+    await tester.pumpAndSettle(); // the templates future resolves and the index rebuilds
+    await tester.enterText(find.byType(TextField), 'lrgb');
+    await tester.pump();
+    expect(find.text('New sequence from template: Deep Sky LRGB'), findsOneWidget);
+    await tester.tap(find.text('New sequence from template: Deep Sky LRGB'));
+    await tester.pumpAndSettle();
+    expect(seq.created, hasLength(1));
+    expect(seq.created.single, startsWith('Deep Sky LRGB → Deep Sky LRGB 20'));
+    expect(container.read(selectedSequenceIdProvider), 'seq-new');
+    expect(container.read(selectedTabIndexProvider), kRunTabIndex);
+  });
+
+  testWidgets('#1170 a Tonight\'s Sky row is a "Go to" entry that centres the planetarium', (tester) async {
+    final container = await _pumpPalette(tester, [tonightSkyProvider.overrideWith((ref) async => [_m31])]);
+    // The Planning tab keeps the selection alive by watching it; stand in for it.
+    container.listen(selectedTonightObjectProvider, (_, _) {});
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField), 'andromeda');
+    await tester.pump();
+    await tester.tap(find.text('Go to Andromeda Galaxy'));
+    await tester.pumpAndSettle();
+    final cmd = container.read(planetariumCommandProvider);
+    expect(cmd?['type'], 'goto');
+    expect(cmd?['ra'], 10.68);
+    expect(cmd?['name'], 'Andromeda Galaxy');
+    expect(container.read(selectedTonightObjectProvider), 'M31');
+    expect(container.read(selectedTabIndexProvider), kPlanningTabIndex);
   });
 }

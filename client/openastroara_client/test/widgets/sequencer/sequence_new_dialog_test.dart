@@ -106,7 +106,7 @@ void main() {
           body: Consumer(builder: (context, ref, _) {
             return ElevatedButton(
               onPressed: () async {
-                returnedId = await createSequenceFromTemplate(context, ref,
+                returnedId = await createSequenceFromTemplate(context, ProviderScope.containerOf(context),
                     templateName: 'Deep-sky LRGB', newName: 'M42');
               },
               child: const Text('go'),

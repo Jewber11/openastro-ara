@@ -371,11 +371,86 @@ const List<SettingsSearchEntry> _actionEntries = <SettingsSearchEntry>[
   ),
 ];
 
-List<SettingsSearchEntry> buildSearchIndex() {
+// #1170 — equipment operations as palette commands. Each goes through the same
+// notifier the equipment chips use, so ⌘K "park the mount" is the chip's park.
+const List<SettingsSearchEntry> _equipmentActionEntries = <SettingsSearchEntry>[
+  SettingsSearchEntry(
+    actionId: 'action.mount.park',
+    label: 'Park the mount',
+    groupLabel: 'Equipment',
+    keywords: ['park', 'mount', 'telescope', 'stow', 'home position', 'end of night'],
+  ),
+  SettingsSearchEntry(
+    actionId: 'action.mount.unpark',
+    label: 'Unpark the mount',
+    groupLabel: 'Equipment',
+    keywords: ['unpark', 'mount', 'telescope', 'wake', 'start of night'],
+  ),
+  SettingsSearchEntry(
+    actionId: 'action.mount.home',
+    label: 'Find the mount\'s home position',
+    groupLabel: 'Equipment',
+    keywords: ['home', 'find home', 'mount', 'telescope', 'index'],
+  ),
+  SettingsSearchEntry(
+    actionId: 'action.mount.tracking_on',
+    label: 'Start tracking',
+    groupLabel: 'Equipment',
+    keywords: ['tracking', 'track', 'sidereal', 'mount', 'on'],
+  ),
+  SettingsSearchEntry(
+    actionId: 'action.mount.tracking_off',
+    label: 'Stop tracking',
+    groupLabel: 'Equipment',
+    keywords: ['tracking', 'track', 'stop', 'mount', 'off'],
+  ),
+  SettingsSearchEntry(
+    actionId: 'action.camera.cooler_off',
+    label: 'Switch the camera cooler off',
+    groupLabel: 'Equipment',
+    keywords: ['cooler', 'warm', 'warm up', 'camera', 'tec', 'off', 'end of night'],
+  ),
+];
+
+/// #1170 — the prefixes of the DYNAMIC action ids built per palette open.
+const String templateActionPrefix = 'action.template:';
+const String gotoActionPrefix = 'action.goto:';
+
+/// #1170 — "New sequence from template: X" for each daemon template.
+List<SettingsSearchEntry> templateEntries(Iterable<String> templateNames) => [
+  for (final name in templateNames)
+    SettingsSearchEntry(
+      actionId: '$templateActionPrefix$name',
+      label: 'New sequence from template: $name',
+      groupLabel: 'Sequence templates',
+      keywords: ['template', 'new sequence', 'create', name.toLowerCase()],
+    ),
+];
+
+/// #1170 — "Go to `<target>`" for each Tonight's Sky row (id, name, type).
+List<SettingsSearchEntry> targetEntries(Iterable<(String id, String name, String type)> targets) => [
+  for (final (id, name, type) in targets)
+    SettingsSearchEntry(
+      actionId: '$gotoActionPrefix$id',
+      label: 'Go to $name',
+      groupLabel: "Tonight's Sky",
+      description: type,
+      keywords: ['go to', 'target', 'frame', 'centre', 'center', name.toLowerCase(), type.toLowerCase()],
+    ),
+];
+
+List<SettingsSearchEntry> buildSearchIndex({
+  Iterable<String> templateNames = const [],
+  Iterable<(String id, String name, String type)> targets = const [],
+}) {
   final entries = <SettingsSearchEntry>[];
   // 0. §61.10 — tab navigation ("go to run", "planning", …) + actions.
   entries.addAll(_navEntries);
   entries.addAll(_actionEntries);
+  entries.addAll(_equipmentActionEntries);
+  // #1170 — what the daemon offers right now: templates and tonight's targets.
+  entries.addAll(templateEntries(templateNames));
+  entries.addAll(targetEntries(targets));
   // 1. Index panels.
   for (final group in settingsTree) {
     for (final panel in group.panels) {
