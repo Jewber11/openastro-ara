@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:dio/dio.dart';
@@ -10,9 +11,11 @@ import '../../models/sequence/rig_capabilities.dart';
 import '../../models/sequence/sequence_summary.dart';
 import '../../services/profile_api.dart';
 import '../../services/sequence_api.dart';
+import '../../util/mosaic_project_math.dart';
 import '../../theme/ara_colors.dart';
 import '../../widgets/sequencer/target_plan_dialog.dart';
 import '../app_shell_state.dart';
+import '../library/mosaics_state.dart';
 import '../saved_server_state.dart';
 import '../settings/autofocus_settings_state.dart';
 import '../settings/filter_set_state.dart';
@@ -130,6 +133,10 @@ Future<ImagingRunResult?> createImagingRun(
   // "<target> 1/N".."<target> N/N", all sharing [positionAngleDeg]. Empty or
   // single-entry = the ordinary single-target run at [raDeg]/[decDeg].
   List<({double raDeg, double decDeg})> mosaicPanels = const [],
+  // §47 / #1146 — the framing grid behind [mosaicPanels] (columns, rows,
+  // overlap). With a daemon, a mosaic run also registers a mosaic PROJECT so
+  // per-panel progress survives restarts and shows in the Library.
+  ({int cols, int rows, double overlapPercent})? mosaicGrid,
   // Planning-redesign S8: false = stay on the CALLING tab after a create
   // (the Tonight's Sky panel shows its own confirmation card with a
   // "View in Run" action instead of yanking the user away mid-planning).
@@ -153,6 +160,7 @@ Future<ImagingRunResult?> createImagingRun(
       remainingDarkHours: remainingDarkHours,
       positionAngleDeg: positionAngleDeg,
       mosaicPanels: mosaicPanels,
+      mosaicGrid: mosaicGrid,
       jumpToRun: jumpToRun,
     );
   } finally {
@@ -168,6 +176,7 @@ Future<ImagingRunResult?> _createImagingRunPinned(
   double? remainingDarkHours,
   double? positionAngleDeg,
   List<({double raDeg, double decDeg})> mosaicPanels = const [],
+  ({int cols, int rows, double overlapPercent})? mosaicGrid,
   bool jumpToRun = true,
 }) async {
   final api = ref.read(sequenceApiProvider);
@@ -376,6 +385,7 @@ Future<ImagingRunResult?> _createImagingRunPinned(
     // creating a fresh run then would duplicate the target.
     final liveResult = await _tryLiveAppend(container, api, selectedId, blocks);
     if (liveResult != null) {
+      await _registerMosaicProject(container, targetName, panels, mosaicGrid, positionAngleDeg, frameCount, choice.filterPlan);
       if (jumpToRun) {
         container.read(selectedTabIndexProvider.notifier).select(kRunTabIndex);
       }
@@ -390,6 +400,7 @@ Future<ImagingRunResult?> _createImagingRunPinned(
     if (newBody != null) {
       final detail = await api.updateSequence(selectedId, body: newBody);
       _syncAfterBodyChange(container, selectedId, detail);
+      await _registerMosaicProject(container, targetName, panels, mosaicGrid, positionAngleDeg, frameCount, choice.filterPlan);
       if (jumpToRun) {
         container.read(selectedTabIndexProvider.notifier).select(kRunTabIndex);
       }
@@ -465,6 +476,8 @@ Future<ImagingRunResult?> _createImagingRunPinned(
     }
     return ImagingRunResult(draftId, appended: false, draft: true);
   }
+
+  await _registerMosaicProject(container, targetName, panels, mosaicGrid, positionAngleDeg, frameCount, choice.filterPlan);
 
   // Same post-create choreography as the NINA import flow: refresh the list,
   // select the new sequence (the Run tab listens and loads it), then bring the
@@ -712,4 +725,49 @@ void _syncAfterBodyChange(
     container.read(sequenceEditorProvider.notifier).load(detail);
   }
   container.invalidate(sequenceListProvider);
+}
+
+/// §47 / #1146 — a mosaic run (more than one panel) also registers a mosaic
+/// PROJECT on the daemon: the plan plus the per-panel centres, with the run's
+/// frame count as "a panel is done". The daemon derives per-panel progress
+/// from the light frames filed under each `<name> i/N` block, so the Library
+/// can say "panels 1–3 done, 4–6 owed" after a restart. Best-effort: the run
+/// is already created; a failed registration is logged, never surfaced.
+Future<void> _registerMosaicProject(
+  ProviderContainer container,
+  String targetName,
+  List<({double raDeg, double decDeg, String name})> panels,
+  ({int cols, int rows, double overlapPercent})? grid,
+  double? positionAngleDeg,
+  int frameCount,
+  List<FilterPlanStep>? filterPlan,
+) async {
+  if (panels.length < 2) return;
+  final api = container.read(mosaicApiProvider);
+  if (api == null) return;
+  final cols = grid?.cols ?? panels.length;
+  final rows = grid?.rows ?? 1;
+  // On the circle: a mosaic straddling 0h must not average to 12h (§47.3).
+  final centreRa = circularMeanRaDeg(panels.map((p) => p.raDeg));
+  final centreDec = panels.map((p) => p.decDeg).reduce((a, b) => a + b) / panels.length;
+  try {
+    await api.create(
+      // buildTargetBlock trims the block name; the project must match it exactly.
+      name: targetName.trim(),
+      centerRaDeg: centreRa,
+      centerDecDeg: centreDec,
+      cols: cols * rows == panels.length ? cols : panels.length,
+      rows: cols * rows == panels.length ? rows : 1,
+      overlapPercent: grid?.overlapPercent ?? 0,
+      positionAngleDeg: positionAngleDeg ?? 0,
+      panels: [for (final p in panels) (raDeg: p.raDeg, decDeg: p.decDeg)],
+      // A filter plan gives each panel one loop PER STEP, so the panel owes
+      // the sum of the steps, not the single-filter frame count.
+      framesPerPanel: mosaicFramesPerPanel(frameCount, filterPlan),
+    );
+    // The Library's Mosaics section, when it is on screen, picks the project up.
+    unawaited(container.read(mosaicProjectsProvider.notifier).refresh());
+  } catch (e) {
+    debugPrint('[planning] mosaic project registration failed (run is unaffected): $e');
+  }
 }
