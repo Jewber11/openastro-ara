@@ -31,6 +31,22 @@ void main() {
     );
   });
 
+  test('#1264 before anything is measured the daemon\'s prior stands in, named by its source', () {
+    expect(
+      unguidedCeilingLine(guided: false, calibration: null, skyLimitedSeconds: 300, priorSeconds: 13.8, priorSource: "the mount's spec sheet (manufacturer)"),
+      "Unguided: about 14 s (from the mount's spec sheet (manufacturer); the first run measures it) — the run uses this lower figure until it has measured.",
+    );
+    expect(
+      unguidedCeilingLine(guided: false, calibration: null, skyLimitedSeconds: 10, priorSeconds: 60),
+      contains('the sky limit above is the lower of the two'),
+    );
+    expect(
+      unguidedCeilingLine(guided: false, calibration: measured, skyLimitedSeconds: 300, priorSeconds: 13.8),
+      startsWith('Unguided: about 45 s (measured'),
+      reason: 'a measurement beats the prior',
+    );
+  });
+
   test('a measured ceiling below the sky limit is the number the run uses', () {
     expect(
       unguidedCeilingLine(

@@ -263,8 +263,10 @@ void main() {
       GuiderStatus? guider,
       TrackingCalibration? tracking,
       double noiseTolerancePct = 5,
+      TrackingPrior prior = const TrackingPrior(),
     }) async {
       container = ProviderContainer(overrides: [
+        trackingPriorProvider.overrideWith((ref) async => prior),
         planningPrefsProvider.overrideWith(
             () => _SeededPrefs(PlanningPrefs(noiseTolerancePct: noiseTolerancePct))),
         opticsSettingsProvider.overrideWith(() => _SeededOptics(optics)),
@@ -302,6 +304,13 @@ void main() {
               source: 'measured'));
       expect(find.textContaining('Suggested exposure:'), findsOneWidget);
       expect(find.textContaining('Unguided: about 45 s (measured 2026-10-1'),
+          findsOneWidget);
+    });
+
+    testWidgets('#1264 stage 1: with nothing measured, the daemon\'s resolved prior is shown with its source', (tester) async {
+      await pumpAdvisor(tester,
+          prior: const TrackingPrior(seconds: 13.8, source: "the mount's spec sheet (community)"));
+      expect(find.textContaining("from the mount's spec sheet (community); the first run measures it"),
           findsOneWidget);
     });
 
@@ -494,3 +503,4 @@ class _SeededPrefs extends PlanningPrefsNotifier {
   @override
   PlanningPrefs build() => _v;
 }
+
