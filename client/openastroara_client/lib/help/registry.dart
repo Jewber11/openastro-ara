@@ -2196,4 +2196,46 @@ const Map<String, Help> helpRegistry = {
         'For the deepest red, also turn your monitor\'s brightness right down — a dim red screen '
         'beats a bright one, and no software filter can undo a backlight at full blast.',
   ),
+
+  // ── Unguided (img.unguided, #1264) ─────────────────────────────────────
+  'img.unguided.ceiling': Help(
+    key: 'img.unguided.ceiling',
+    title: 'Unguided exposure ceiling',
+    body:
+        'How long a sub your mount holds without a guider before stars trail. Ara measures it: on a rig with no '
+        'guider every run starts with a Tracking Probe at the target, and the imaging loops are shortened to the '
+        'ceiling it finds (the frame count is re-derived so the planned integration holds). The planner shows it '
+        'next to the sky-limited exposure as "Unguided: about N s" and the run uses the lower of the two.\n\n'
+        'The stored figure becomes the next run\'s starting point. Recalibrate forgets it — after re-balancing, '
+        'a worm adjustment or a new polar alignment — so the next ladder starts from scratch.',
+    relatedHelpKeys: ['img.unguided.probe', 'img.unguided.guard'],
+    keywords: ['trailing', 'periodic error', 'unguided'],
+  ),
+  'img.unguided.probe': Help(
+    key: 'img.unguided.probe',
+    title: 'Tracking probe',
+    body:
+        'A ladder of exposures at the target — 10, 30, 60 and 120 s, then the planned sub or twice the prior '
+        '(whichever is lower) as a final rung; nothing longer than that cap is tried. Each frame is judged by '
+        'the same star analysis autofocus uses: a rung passes when the median eccentricity stays at or under 0.5 '
+        'and the FWHM within 1.2× the first usable rung\'s. Too few stars makes a rung unusable, not a fail. '
+        'The ceiling is the longest passing rung, moved halfway toward the first failing one. When even the '
+        'first usable rung trails, that rung IS the ceiling (nothing shorter was tried; the guard can still step '
+        'down from there). Only a ladder with fewer than two usable rungs and no failure is inconclusive — then '
+        'the prior is kept and the summary says so. A result more than 2× off the prior raises a notification: '
+        'check balance, clutch and the worm — or the prior is wrong.\n\n'
+        'Alt-az mounts also suffer field rotation, a different ceiling the probe does not measure yet.',
+    relatedHelpKeys: ['img.unguided.ceiling', 'img.unguided.guard'],
+  ),
+  'img.unguided.guard': Help(
+    key: 'img.unguided.guard',
+    title: 'Unguided exposure guard',
+    body:
+        'Watches each unguided imaging loop. Two consecutive lights over the eccentricity tolerance step the '
+        'exposure down one rung (those frames are tagged "trailed" and you get one notification); ten consecutive '
+        'round ones (eccentricity 0.3 or better) below the sky-limited length step it back up. On the same rigs '
+        'Center After Drift plate-solves every saved light and re-centres the target once it has drifted more than '
+        '10 arcminutes — a run that drifts less is left alone.',
+    relatedHelpKeys: ['img.unguided.ceiling', 'img.unguided.probe'],
+  ),
 };
