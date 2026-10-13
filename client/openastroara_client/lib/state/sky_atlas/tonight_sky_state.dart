@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../services/profile_api.dart';
 import '../../services/tonight_sky_api.dart';
 import '../../util/tonight_sky_local.dart';
+import '../planning/planning_prefs_state.dart';
 import '../saved_server_state.dart';
 import '../settings/camera_electronics_state.dart';
 import '../settings/custom_horizon_state.dart';
@@ -88,6 +89,13 @@ Future<List<TonightSkyObject>> _rankAt(Ref ref, DateTime atUtc) async {
       .map((p) => (p.azimuthDeg, p.altitudeDeg))
       .toList();
   final opticsFinal = optics;
+  // #1140 — the Glover noise-tolerance knob is a client preference; wait for
+  // the saved value once so a non-default knob doesn't rank twice at launch.
+  await ref
+      .read(planningPrefsProvider.notifier)
+      .ready
+      .timeout(const Duration(seconds: 3), onTimeout: () {});
+  final noiseTolerancePct = ref.watch(planningPrefsProvider).noiseTolerancePct;
   // Rank OFF the UI isolate: the mirrored catalog is thousands of rows × a
   // 289-sample window scan each — synchronous on the UI thread is jank.
   return Isolate.run(() => computeTonightSkyLocal(
@@ -102,6 +110,7 @@ Future<List<TonightSkyObject>> _rankAt(Ref ref, DateTime atUtc) async {
         // spans broadband + narrowband makes far more of the sky worth
         // listing — a 10-row cap hid the variety the scoring surfaces.
         limit: 30,
+        noiseTolerancePct: noiseTolerancePct,
       ));
 }
 
