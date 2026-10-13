@@ -839,8 +839,10 @@ public sealed partial class SqliteFrameRepository : IFrameRepository {
             Guid id, OpenAstroAra.Profile.Interfaces.IProfileService profileService, CancellationToken ct) {
         // §18.I — reuse the proven preview FITS read path, then wrap the raw 16-bit pixels as IImageData for
         // the plate-solver. The real profileService is passed in (the CLI solver writes a temp FITS via the
-        // image's SaveToDisk, which reads the profile for the file pattern). Star detection/annotator are
-        // genuinely untouched by solving → null. FITS frames are 16-bit; isBayered preserves the CFA flag.
+        // image's SaveToDisk, which reads the profile for the file pattern). #1147: the headless detector
+        // and circle annotator are wired so DetectStars(annotateImage: true) on this image works; solving
+        // itself never calls them. FITS frames are 16-bit; isBayered preserves the CFA flag, and the
+        // metadata carries the pattern so an OSC frame renders as luminance, not the CFA checkerboard.
         var (catalogued, _) = await GetPathAndTypeAsync(id, ct);
         var filePath = ConfinedExistingPath(catalogued);
         if (filePath is null) {
@@ -849,9 +851,30 @@ public sealed partial class SqliteFrameRepository : IFrameRepository {
         // A corrupt/truncated FITS lets LoadFitsPixels throw → 500, consistent with GetPreviewAsync/
         // GetThumbnailAsync on the same file (a malformed catalogued frame is an exceptional, not user-input, case).
         var (pixels, width, height, bayerPat) = LoadFitsPixels(filePath);
+        var metaData = new OpenAstroAra.Image.ImageData.ImageMetaData();
+        // Through Debayer.TryParse, not Enum.TryParse: a FITS string card comes back quoted and padded
+        // ("'RGGB    '") and some cameras write it lowercase; both must still name the mosaic.
+        metaData.Camera.SensorType = SensorTypeFromBayerPat(bayerPat);
         return new OpenAstroAra.Image.ImageData.BaseImageData(
             pixels, width, height, bitDepth: 16, isBayered: !string.IsNullOrEmpty(bayerPat),
-            new OpenAstroAra.Image.ImageData.ImageMetaData(), profileService, null!, null!);
+            metaData, profileService,
+            OpenAstroAra.Image.ImageAnalysis.HeadlessStarDetection.Instance,
+            OpenAstroAra.Image.ImageAnalysis.CircleStarAnnotator.Instance);
+    }
+
+    /// <summary>#1147 — the FITS <c>BAYERPAT</c> card as the image pipeline's sensor type; Monochrome when
+    /// absent or not one of the four Bayer mosaics (the render then keeps the raw frame, never a guess).</summary>
+    internal static OpenAstroAra.Core.Enums.SensorType SensorTypeFromBayerPat(string? bayerPat) {
+        if (!OpenAstroAra.Stretch.Debayer.TryParse(bayerPat, out var pattern)) {
+            return OpenAstroAra.Core.Enums.SensorType.Monochrome;
+        }
+        return pattern switch {
+            OpenAstroAra.Stretch.BayerPattern.RGGB => OpenAstroAra.Core.Enums.SensorType.RGGB,
+            OpenAstroAra.Stretch.BayerPattern.BGGR => OpenAstroAra.Core.Enums.SensorType.BGGR,
+            OpenAstroAra.Stretch.BayerPattern.GRBG => OpenAstroAra.Core.Enums.SensorType.GRBG,
+            OpenAstroAra.Stretch.BayerPattern.GBRG => OpenAstroAra.Core.Enums.SensorType.GBRG,
+            _ => OpenAstroAra.Core.Enums.SensorType.Monochrome,
+        };
     }
 
     public async Task<(double RaDegrees, double DecDegrees)?> TryReadTargetCoordinatesAsync(Guid id, CancellationToken ct) {
