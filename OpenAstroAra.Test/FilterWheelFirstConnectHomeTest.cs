@@ -58,6 +58,12 @@ namespace OpenAstroAra.Test {
             private int _namesWithheld;
 
             public readonly ConcurrentQueue<int> PositionWrites = new();
+            private int _reads;
+            /// <summary>Every GET the stub answered (#1173). A "still nothing after a while" wait
+            /// counts these rather than wall-clock, so a loaded runner stretches the wait and never
+            /// shortens what the service did in it. One refresh tick is several reads (position,
+            /// names, offsets), so a read count is a lower bound on ticks, not a tick count.</summary>
+            public int Reads => Volatile.Read(ref _reads);
 
             /// <summary>The stub answers this many <c>names</c> reads with an Alpaca error before
             /// serving the list, so the service's slot read fails and <c>_slots</c> stays null
@@ -94,6 +100,9 @@ namespace OpenAstroAra.Test {
                     }
                     var leaf = ctx.Request.Url!.AbsolutePath.TrimEnd('/');
                     leaf = leaf[(leaf.LastIndexOf('/') + 1)..].ToUpperInvariant();
+                    if (ctx.Request.HttpMethod != "PUT") {
+                        Interlocked.Increment(ref _reads);
+                    }
                     string value = "true";
                     var errorNumber = 0;
                     // One atomic decrement: a read-then-decrement pair could let two GETs share a slot.
@@ -163,6 +172,17 @@ namespace OpenAstroAra.Test {
                 await Task.Delay(50);
             }
             Assert.Fail($"filter wheel never reached {state}");
+        }
+
+        private static async Task<bool> WaitForReadsAsync(StubWheel stub, int target, TimeSpan budget) {
+            var deadline = DateTime.UtcNow + budget;
+            while (stub.Reads < target) {
+                if (DateTime.UtcNow >= deadline) {
+                    return false;
+                }
+                await Task.Delay(Ticks(1));
+            }
+            return true;
         }
 
         private static async Task<bool> WaitForWriteAsync(StubWheel stub, TimeSpan timeout) {
@@ -371,9 +391,13 @@ namespace OpenAstroAra.Test {
             await svc.ChangeFilterAsync(new FilterChangeRequestDto(2), idempotencyKey: null, CancellationToken.None);
             Assert.That(await WaitForWriteAsync(stub, TimeSpan.FromSeconds(10)), Is.True);
             while (stub.PositionWrites.TryDequeue(out _)) { }
-            // The stale home task runs now: it must step aside.
+            // The stale home task runs now: it must step aside. HomeInBackground is synchronous, so
+            // a stale write would already be queued here; the wait below (a few more stub reads,
+            // #1173: counted rather than a fixed 500 ms) only lets any in-flight refresh land
+            // before the empty-queue claim.
+            var readsAtDispatch = stub.Reads;
             svc.HomeInBackground(client!, stale);
-            await Task.Delay(500);
+            Assert.That(await WaitForReadsAsync(stub, readsAtDispatch + 5, TimeSpan.FromSeconds(10)), Is.True, "the refresh stopped reading");
             Assert.That(stub.PositionWrites, Is.Empty, "a home whose token moved never writes Position = 0");
             // And the CURRENT token still homes (proves the guard is the token, not the connection checks).
             var (current, _) = svc.HomeTokenForTest();
