@@ -862,7 +862,7 @@ public sealed partial class CameraService : ICameraService, IRetainedDeviceSourc
             pointing: pointing);
         var writeMs = storeTiming.ElapsedMilliseconds;
         try {
-            await RegisterFrameAsync(frameId, request, frameType, targetName, capturedAt, filePath, width, height, focuserPos).ConfigureAwait(false);
+            await RegisterFrameAsync(frameId, request, frameType, targetName, capturedAt, filePath, width, height, focuserPos, appliedBin: applied.BinX).ConfigureAwait(false);
         } catch (Exception ex) {
             // The FITS is on disk but invisible to the catalog; name the path so an operator can
             // recover it — and the §28.8 startup orphan scan re-registers it on the next boot.
@@ -872,6 +872,11 @@ public sealed partial class CameraService : ICameraService, IRetainedDeviceSourc
         LogCaptureComplete(frameId, width, height, filePath);
         LogCaptureStoreTiming(frameId, writeMs, storeTiming.ElapsedMilliseconds - writeMs);
         PrewarmPreview(frameId);
+        // #1140 P2 — the sky background is measured for EVERY frame type, off the capture path and
+        // apart from the HFR queue: a flat or dark records its level, a starless or cloudy light
+        // still has a background the calibration fit can read, and a light the 2-slot HFR queue
+        // had to drop is measured all the same.
+        _ = Task.Run(() => MeasureBackgroundAsync(frameId, pixels), CancellationToken.None);
         if (frameType == FrameType.Light) {
             _savedLights?.RecordLightSaved(frameId);
             // §59.5 — off the capture path: HFR/star analysis of a full frame takes real CPU
@@ -883,6 +888,24 @@ public sealed partial class CameraService : ICameraService, IRetainedDeviceSourc
         }
         return true;
     }
+
+    /// <summary>#1140 P2 — one count-array pass over the frame, written to the catalog row. Best
+    /// effort: the frame is already captured and registered; a failed measurement is a logged skip.</summary>
+    [SuppressMessage("Design", "CA1031:Do not catch general exception types",
+        Justification = "Fire-and-forget enrichment boundary, like the HFR analysis: a DB fault must degrade to a logged skip, never fault the worker.")]
+    internal async Task MeasureBackgroundAsync(Guid frameId, ushort[] pixels) {
+        try {
+            var (backgroundAdu, medianAdu) = FrameBackground.Measure(pixels);
+            if (_frames is not null && !double.IsNaN(backgroundAdu)) {
+                await _frames.UpdateBackgroundAsync(frameId, backgroundAdu, medianAdu, CancellationToken.None).ConfigureAwait(false);
+            }
+        } catch (Exception ex) {
+            LogBackgroundMeasureFailed(ex, frameId);
+        }
+    }
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Sky-background measurement for frame {FrameId} failed; the row keeps no background (a histogram read back-fills it).")]
+    private partial void LogBackgroundMeasureFailed(Exception ex, Guid frameId);
 
     // Only a measurement with enough stars to be stable feeds the catalog + the §59.5
     // HFR-drift trigger — a 2-star HFR is noise that would swing the trend line. Deliberately
@@ -1630,7 +1653,10 @@ public sealed partial class CameraService : ICameraService, IRetainedDeviceSourc
         }
     }
 
-    private async Task RegisterFrameAsync(Guid frameId, ExposureRequestDto request, FrameType frameType, string targetName, DateTimeOffset capturedAt, string filePath, int width, int height, int? focuserPosition = null) {
+    // appliedBin: the binning the driver ACTUALLY used (read back after the exposure, like XBINNING in
+    // the header), not the requested one — a driver can coerce a 2 to 1, and the #1140 pixel scale
+    // must follow the frame. Null = no read-back available (the request's value is the best we have).
+    internal async Task RegisterFrameAsync(Guid frameId, ExposureRequestDto request, FrameType frameType, string targetName, DateTimeOffset capturedAt, string filePath, int width, int height, int? focuserPosition = null, int? appliedBin = null) {
         // §40/§50 — a capture that runs INSIDE a sequence run carries the run's
         // catalog session via the ambient CaptureSessionScope (AsyncLocal set by
         // the run worker); everything else — the REST snapshot path — falls back
@@ -1664,7 +1690,8 @@ public sealed partial class CameraService : ICameraService, IRetainedDeviceSourc
             QualityScore: null,
             Rating: 0,
             Tags: Array.Empty<string>(),
-            FocuserPosition: focuserPosition), CancellationToken.None).ConfigureAwait(false);
+            FocuserPosition: focuserPosition,
+            Bin: appliedBin ?? request.BinX), CancellationToken.None).ConfigureAwait(false);
     }
 
     // ── §32.4 cache (single-flight with coalescing, mirrors TelescopeService) ────────────────────

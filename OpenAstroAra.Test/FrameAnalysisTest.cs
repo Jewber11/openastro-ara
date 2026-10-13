@@ -260,6 +260,65 @@ namespace OpenAstroAra.Test {
             Assert.Pass("fire-and-forget boundary held");
         }
 
+        [Test]
+        public async Task The_background_is_measured_apart_from_the_star_gate_and_written_for_the_frame() {
+            // #1140 P2 — MeasureBackgroundAsync is the per-frame path every frame type takes at
+            // registration: p05 of 4 pixels is the darkest one (500); the median rank (n+1)/2 = 2 is 510.
+            var frames = new Mock<IFrameRepository>();
+            using var camera = new CameraService(frames: frames.Object);
+            var id = Guid.NewGuid();
+
+            await camera.MeasureBackgroundAsync(id, new ushort[] { 500, 510, 520, 9000 });
+
+            frames.Verify(f => f.UpdateBackgroundAsync(id, 500, 510, It.IsAny<CancellationToken>()), Times.Once);
+            frames.Verify(f => f.UpdateAnalysisAsync(It.IsAny<Guid>(), It.IsAny<double>(), It.IsAny<int>(), It.IsAny<CancellationToken>()), Times.Never);
+
+            await camera.MeasureBackgroundAsync(id, Array.Empty<ushort>());
+            frames.Verify(f => f.UpdateBackgroundAsync(id, It.IsAny<double>(), It.IsAny<double>(), It.IsAny<CancellationToken>()), Times.Once, "an empty frame writes nothing");
+        }
+
+        [Test]
+        public async Task Registering_a_capture_stores_the_APPLIED_binning_on_the_row() {
+            // #1140 P2 — the pixel scale the calibration fit needs comes from the binning the driver
+            // actually used: a request for 2 that the driver coerced to 1 must store 1 (like XBINNING).
+            var frames = new Mock<IFrameRepository>();
+            frames.Setup(f => f.EnsureManualCaptureSessionAsync(It.IsAny<CancellationToken>())).ReturnsAsync(Session);
+            using var camera = new CameraService(frames: frames.Object);
+            var path = Path.Combine(_dir, "bin2.fits");
+            await File.WriteAllBytesAsync(path, new byte[64]);
+            var id = Guid.NewGuid();
+
+            await camera.RegisterFrameAsync(id, new ExposureRequestDto(30, 100, BinX: 2, BinY: 2), FrameType.Flat, "flat", DateTimeOffset.UtcNow, path, 10, 10, appliedBin: 1);
+            frames.Verify(f => f.InsertAsync(It.Is<FrameDto>(d => d.Id == id && d.Bin == 1 && d.BackgroundAdu == null), It.IsAny<CancellationToken>()), Times.Once);
+
+            // No read-back available: the request's binning is the best figure there is.
+            var id2 = Guid.NewGuid();
+            await camera.RegisterFrameAsync(id2, new ExposureRequestDto(30, 100, BinX: 2, BinY: 2), FrameType.Flat, "flat", DateTimeOffset.UtcNow, path, 10, 10);
+            frames.Verify(f => f.InsertAsync(It.Is<FrameDto>(d => d.Id == id2 && d.Bin == 2), It.IsAny<CancellationToken>()), Times.Once);
+        }
+
+        [Test]
+        public async Task UpdateBackground_stamps_p05_and_median_and_insert_carries_bin() {
+            var id = Guid.NewGuid();
+            await _repo.InsertAsync(Frame(id) with { Bin = 2 }, CancellationToken.None);
+            Assert.That((await _repo.GetAsync(id, CancellationToken.None))!.BackgroundAdu, Is.Null, "unmeasured until the worker runs");
+
+            await _repo.UpdateBackgroundAsync(id, 518, 603.5, CancellationToken.None);
+
+            var got = await _repo.GetAsync(id, CancellationToken.None);
+            Assert.That(got!.BackgroundAdu, Is.EqualTo(518));
+            Assert.That(got.MedianAdu, Is.EqualTo(603.5));
+            Assert.That(got.Bin, Is.EqualTo(2));
+            var listed = (await _repo.ListAsync(10, null, null, null, CancellationToken.None)).Items.Single(f => f.Id == id);
+            Assert.That(listed.BackgroundAdu, Is.EqualTo(518));
+            Assert.That(listed.Gain, Is.EqualTo(100), "the list item carries what the calibration fit reads");
+            Assert.That(listed.Bin, Is.EqualTo(2));
+
+            await Assert.DoesNotThrowAsync(() => _repo.UpdateBackgroundAsync(Guid.NewGuid(), 1, 1, CancellationToken.None));
+            await _repo.UpdateBackgroundAsync(id, double.NaN, double.NaN, CancellationToken.None);
+            Assert.That((await _repo.GetAsync(id, CancellationToken.None))!.BackgroundAdu, Is.EqualTo(518), "NaN never overwrites a measurement");
+        }
+
         private static FrameDto Frame(Guid id) => new(
             Id: id,
             SessionId: Session,

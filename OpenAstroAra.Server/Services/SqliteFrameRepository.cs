@@ -460,13 +460,15 @@ public sealed partial class SqliteFrameRepository : IFrameRepository {
                  exposure_seconds, gain, "offset", temperature_c, captured_utc,
                  file_path, file_size_bytes, width, height, bit_depth,
                  hfr, star_count, eccentricity, guiding_rms_arcsec, snr_estimate,
-                 quality_score_json, rating, tags_json, focuser_position)
+                 quality_score_json, rating, tags_json, focuser_position,
+                 background_adu, median_adu, bin)
             VALUES
                 ($id, $session_id, $target_name, $frame_type, $filter_name,
                  $exposure_seconds, $gain, $offset, $temperature_c, $captured_utc,
                  $file_path, $file_size_bytes, $width, $height, $bit_depth,
                  $hfr, $star_count, $eccentricity, $guiding_rms_arcsec, $snr_estimate,
-                 $quality_score_json, $rating, $tags_json, $focuser_position);
+                 $quality_score_json, $rating, $tags_json, $focuser_position,
+                 $background_adu, $median_adu, $bin);
             """;
         cmd.Parameters.AddWithValue("$id", f.Id.ToString());
         cmd.Parameters.AddWithValue("$session_id", f.SessionId.ToString());
@@ -495,6 +497,9 @@ public sealed partial class SqliteFrameRepository : IFrameRepository {
         cmd.Parameters.AddWithValue("$tags_json",
             JsonSerializer.Serialize(f.Tags, AraJsonSerializerContext.Default.IReadOnlyListString));
         cmd.Parameters.AddWithValue("$focuser_position", DbValue(f.FocuserPosition));
+        cmd.Parameters.AddWithValue("$background_adu", DbValue(f.BackgroundAdu));
+        cmd.Parameters.AddWithValue("$median_adu", DbValue(f.MedianAdu));
+        cmd.Parameters.AddWithValue("$bin", DbValue(f.Bin));
         await cmd.ExecuteNonQueryAsync(ct);
         // The session's running count (it stayed 0 for every session until now).
         await using var bump = conn.CreateCommand();
@@ -528,7 +533,8 @@ public sealed partial class SqliteFrameRepository : IFrameRepository {
         var sql = """
             SELECT id, session_id, target_name, frame_type, filter_name,
                    exposure_seconds, captured_utc, hfr, star_count,
-                   quality_score_json, rating, synced_at, sync_target
+                   quality_score_json, rating, synced_at, sync_target,
+                   gain, background_adu, median_adu, bin
             FROM frames
             WHERE 1=1
             """;
@@ -576,7 +582,11 @@ public sealed partial class SqliteFrameRepository : IFrameRepository {
                 SyncedAt: await reader.IsDBNullAsync(11, ct)
                     ? null
                     : DateTimeOffset.Parse(reader.GetString(11)),
-                SyncTarget: await reader.IsDBNullAsync(12, ct) ? null : reader.GetString(12)));
+                SyncTarget: await reader.IsDBNullAsync(12, ct) ? null : reader.GetString(12),
+                Gain: await reader.IsDBNullAsync(13, ct) ? null : reader.GetInt32(13),
+                BackgroundAdu: await reader.IsDBNullAsync(14, ct) ? null : reader.GetDouble(14),
+                MedianAdu: await reader.IsDBNullAsync(15, ct) ? null : reader.GetDouble(15),
+                Bin: await reader.IsDBNullAsync(16, ct) ? null : reader.GetInt32(16)));
         }
         var hasMore = await reader.ReadAsync(ct);  // the pageSize+1 row
         var nextCursor = hasMore ? (offset + pageSize).ToString() : null;
@@ -591,7 +601,8 @@ public sealed partial class SqliteFrameRepository : IFrameRepository {
                    exposure_seconds, gain, "offset", temperature_c, captured_utc,
                    file_path, file_size_bytes, width, height, bit_depth,
                    hfr, star_count, eccentricity, guiding_rms_arcsec, snr_estimate,
-                   quality_score_json, rating, tags_json, focuser_position
+                   quality_score_json, rating, tags_json, focuser_position,
+                   background_adu, median_adu, bin
             FROM frames WHERE id = $id LIMIT 1;
             """;
         cmd.Parameters.AddWithValue("$id", id.ToString());
@@ -636,7 +647,24 @@ public sealed partial class SqliteFrameRepository : IFrameRepository {
             QualityScore: quality,
             Rating: reader.GetInt32(21),
             Tags: tags,
-            FocuserPosition: await reader.IsDBNullAsync(23, ct) ? null : reader.GetInt32(23));
+            FocuserPosition: await reader.IsDBNullAsync(23, ct) ? null : reader.GetInt32(23),
+            BackgroundAdu: await reader.IsDBNullAsync(24, ct) ? null : reader.GetDouble(24),
+            MedianAdu: await reader.IsDBNullAsync(25, ct) ? null : reader.GetDouble(25),
+            Bin: await reader.IsDBNullAsync(26, ct) ? null : reader.GetInt32(26));
+    }
+
+    /// <inheritdoc />
+    public async Task UpdateBackgroundAsync(Guid frameId, double backgroundAdu, double medianAdu, CancellationToken ct) {
+        if (double.IsNaN(backgroundAdu) || double.IsNaN(medianAdu)) {
+            return; // an empty frame measured nothing; never write NaN into the catalog
+        }
+        await using var conn = _db.OpenConnection();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = "UPDATE frames SET background_adu = $bg, median_adu = $med WHERE id = $id";
+        cmd.Parameters.AddWithValue("$bg", backgroundAdu);
+        cmd.Parameters.AddWithValue("$med", medianAdu);
+        cmd.Parameters.AddWithValue("$id", frameId.ToString("D"));
+        await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
     }
 
     public async Task<(byte[] Bytes, string ContentType, OpenAstroAra.Stretch.StretchParams? AppliedManual)?> GetPreviewAsync(Guid id, FramePreviewRequestDto request, CancellationToken ct) {
@@ -1308,8 +1336,9 @@ public sealed partial class SqliteFrameRepository : IFrameRepository {
                 // Corrupt cache entry — fall through and recompute.
             }
         }
+        ushort[]? pixels = null;
         if (histogram is null) {
-            var (pixels, _, _, _) = LoadFitsPixels(filePath);
+            (pixels, _, _, _) = LoadFitsPixels(filePath);
             histogram = ComputeHistogram(pixels);
             TryWriteCache(cachePath, System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(
                 histogram, AraJsonSerializerContext.Default.FrameHistogramDto));
@@ -1320,23 +1349,65 @@ public sealed partial class SqliteFrameRepository : IFrameRepository {
         await using var conn = _db.OpenConnection();
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = """
-            SELECT width, height, bit_depth, star_count, hfr, gain, "offset"
+            SELECT width, height, bit_depth, star_count, hfr, gain, "offset", background_adu
             FROM frames WHERE id = $id LIMIT 1;
             """;
         cmd.Parameters.AddWithValue("$id", id.ToString());
-        await using var reader = await cmd.ExecuteReaderAsync(ct);
-        if (await reader.ReadAsync(ct)) {
-            histogram = histogram with {
-                Width = reader.GetInt32(0),
-                Height = reader.GetInt32(1),
-                BitDepth = reader.GetInt32(2),
-                Stars = await reader.IsDBNullAsync(3, ct) ? null : reader.GetInt32(3),
-                Hfr = await reader.IsDBNullAsync(4, ct) ? null : reader.GetDouble(4),
-                Gain = await reader.IsDBNullAsync(5, ct) ? null : reader.GetInt32(5),
-                Offset = await reader.IsDBNullAsync(6, ct) ? null : reader.GetInt32(6),
-            };
+        var backgroundMissing = false;
+        await using (var reader = await cmd.ExecuteReaderAsync(ct)) {
+            if (await reader.ReadAsync(ct)) {
+                histogram = histogram with {
+                    Width = reader.GetInt32(0),
+                    Height = reader.GetInt32(1),
+                    BitDepth = reader.GetInt32(2),
+                    Stars = await reader.IsDBNullAsync(3, ct) ? null : reader.GetInt32(3),
+                    Hfr = await reader.IsDBNullAsync(4, ct) ? null : reader.GetDouble(4),
+                    Gain = await reader.IsDBNullAsync(5, ct) ? null : reader.GetInt32(5),
+                    Offset = await reader.IsDBNullAsync(6, ct) ? null : reader.GetInt32(6),
+                };
+                backgroundMissing = await reader.IsDBNullAsync(7, ct);
+            }
+        }
+        if (backgroundMissing) {
+            await BackfillBackgroundAsync(id, filePath, pixels, ct).ConfigureAwait(false);
         }
         return histogram;
+    }
+
+    /// <summary>#1140 P2 — a frame the capture worker never measured (scan-ingested, captured before
+    /// the column, or its histogram was cached before this build) gets its sky background the first
+    /// time its histogram is read. Best effort: the histogram is the request; a catalog write that
+    /// fails (a locked database) must not fail it. COALESCE keeps a value a worker wrote meanwhile.</summary>
+    [LoggerMessage(Level = LogLevel.Debug, Message = "Sky-background back-fill for frame {FrameId} failed; the histogram is still served.")]
+    private partial void LogBackgroundBackfillFailed(Exception ex, Guid frameId);
+
+    // One back-fill attempt per frame per process: a frame whose measurement stays null (an empty
+    // image measures NaN; a locked catalog refuses the write) must not reload its whole FITS on
+    // every histogram read.
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, byte> _backfillTried = new();
+
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Design", "CA1031:Do not catch general exception types",
+        Justification = "Best-effort enrichment on a read path: any fault is logged and the histogram is still served.")]
+    private async Task BackfillBackgroundAsync(Guid id, string filePath, ushort[]? pixels, CancellationToken ct) {
+        if (!_backfillTried.TryAdd(id, 0)) {
+            return;
+        }
+        try {
+            pixels ??= LoadFitsPixels(filePath).Pixels;
+            var (p05, median) = FrameBackground.Measure(pixels);
+            if (double.IsNaN(p05)) {
+                return;
+            }
+            await using var conn = _db.OpenConnection();
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = "UPDATE frames SET background_adu = COALESCE(background_adu, $bg), median_adu = COALESCE(median_adu, $med) WHERE id = $id";
+            cmd.Parameters.AddWithValue("$bg", p05);
+            cmd.Parameters.AddWithValue("$med", median);
+            cmd.Parameters.AddWithValue("$id", id.ToString());
+            await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+        } catch (Exception ex) when (ex is not OperationCanceledException) {
+            LogBackgroundBackfillFailed(ex, id);
+        }
     }
 
     private static string HistogramCachePath(string fitsPath) {
