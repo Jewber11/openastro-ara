@@ -6,6 +6,12 @@ import '../../models/plate_solve_result.dart';
 import '../../models/server.dart';
 import '../../services/plate_solve_api.dart';
 
+/// Builds the [PlateSolveApi] a solve uses. Overridable in tests (#1150) so the
+/// state machine (loading → result / error, generation guard) runs against a
+/// fake without a daemon.
+final plateSolveApiFactoryProvider =
+    Provider<PlateSolveApi Function(AraServer)>((ref) => PlateSolveApi.new);
+
 /// §18.I — holds the plate-solve outcome for the Imaging tab's Solve action.
 ///
 /// `AsyncData(null)` is the idle state (nothing solved yet); `AsyncLoading`
@@ -27,7 +33,8 @@ class SolveResult extends AsyncNotifier<PlateSolveResult?> {
     final gen = ++_generation;
     state = const AsyncLoading();
     try {
-      final result = await PlateSolveApi(server).solve(frameId);
+      final result =
+          await ref.read(plateSolveApiFactoryProvider)(server).solve(frameId);
       if (gen == _generation) state = AsyncData(result);
     } catch (e, st) {
       if (gen == _generation) state = AsyncError(e, st);
