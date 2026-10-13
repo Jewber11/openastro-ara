@@ -54,6 +54,17 @@ public static class PlateSolveEndpoints {
             .WithName("CenterOnCoordinates")
             .WithSummary("Slew the mount to coordinates and center by iterative plate solves, as a background job.");
 
+        // §57.4 — "Verify Position — show me an image" after a Stop Mount: one quick snapshot, solved, beside
+        // the mount's reported and intended positions. Synchronous (a 2 s exposure + one solve); 422 when the
+        // solver or optics are not configured, 409 when no camera is connected to take the snapshot.
+        solve.MapPost("/verify-position", VerifyPositionAsync)
+            .Accepts<VerifyPositionRequestDto>("application/json")
+            .Produces<VerifyPositionResultDto>(StatusCodes.Status200OK)
+            .ProducesProblem(StatusCodes.Status422UnprocessableEntity)
+            .ProducesProblem(StatusCodes.Status409Conflict)
+            .WithName("VerifyMountPosition")
+            .WithSummary("§57.4 Verify-Position: a quick snapshot plate-solved and compared with the mount's reported and intended positions.");
+
         // #1121 — read-only: is there a star database where the solver will look? A fresh install
         // that skipped the DEPLOY.md download fails every solve with ASTAP exit 32, and only the
         // daemon log said why. Settings → Plate solving shows this.
@@ -63,6 +74,36 @@ public static class PlateSolveEndpoints {
             .WithSummary("Report the ASTAP star-database directory's contents and whether the solver binary exists.");
 
         return app;
+    }
+
+    // Extracted (not an inline lambda) so the wiring is unit-testable with mocked services.
+    // [FromBody]/[FromServices] are explicit: a host that maps this group without registering the verify
+    // service (the settings-wiring test) must still infer every route's parameters.
+    public static async Task<IResult> VerifyPositionAsync([Microsoft.AspNetCore.Mvc.FromBody] VerifyPositionRequestDto? request,
+            [Microsoft.AspNetCore.Mvc.FromServices] IVerifyPositionService verify, CancellationToken ct) {
+        try {
+            return Results.Ok(await verify.VerifyAsync(request?.ExposureSeconds, ct));
+        } catch (OpenAstroAra.PlateSolving.PlateSolverConfigurationException ex) {
+            return Results.Problem(ex.Message, statusCode: StatusCodes.Status422UnprocessableEntity);
+        } catch (System.IO.FileNotFoundException) {
+            // A non-ASTAP CLI solver whose binary is missing — the same 422 SolveFrameAsync gives it.
+            return Results.Problem("Plate-solver executable not found — check the solver path in the profile.",
+                statusCode: StatusCodes.Status422UnprocessableEntity);
+        } catch (ArgumentOutOfRangeException ex) {
+            // The exposure or binning is outside the camera's capabilities.
+            return Results.Problem(ex.Message, statusCode: StatusCodes.Status422UnprocessableEntity);
+        } catch (TimeoutException) {
+            // The capture path's 20-minute gate wait expired: a leaked in-flight flag, which only a daemon
+            // restart clears. (A gate merely HELD by a long exposure is CameraBusyException below, thrown
+            // before any wait — this branch is the stuck case, and no interactive client waits it out.)
+            return Results.Problem("The camera's in-flight gate is stuck — check the daemon log; a restart clears it.",
+                statusCode: StatusCodes.Status409Conflict);
+        } catch (InvalidOperationException ex) {
+            // CameraBusyException (the gate is held by another exposure: fail fast, tap again later), the
+            // imaging mediator's "no camera connected", and a capture that lost the device mid-exposure:
+            // nothing to look with right now; the message says which.
+            return Results.Problem(ex.Message, statusCode: StatusCodes.Status409Conflict);
+        }
     }
 
     // Extracted (not an inline lambda) so the wiring is unit-testable with a real store.
