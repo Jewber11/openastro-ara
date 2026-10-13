@@ -184,15 +184,17 @@ namespace OpenAstroAra.Sequencer.Conditions {
             var now = DateTime.Now;
             var then = new DateTime(now.Year, now.Month, now.Day, Hours, Minutes, Seconds);
 
-            RolloverTime = SelectedProvider?.GetRolloverTime(this) ?? RolloverTime;
+            // #1155 — read the provider's rollover for THIS calculation; a remaining-time query
+            // must not write the bound RolloverTime (an observable property) as a side effect.
+            var rollover = SelectedProvider?.GetRolloverTime(this) ?? RolloverTime;
             var timeOnlyNow = TimeOnly.FromDateTime(now);
             var timeOnlyThen = TimeOnly.FromDateTime(then);
 
-            if (timeOnlyNow < RolloverTime && timeOnlyThen >= RolloverTime) {
+            if (timeOnlyNow < rollover && timeOnlyThen >= rollover) {
                 then = then.AddDays(-1);
             }
 
-            if (timeOnlyNow >= RolloverTime && timeOnlyThen < RolloverTime) {
+            if (timeOnlyNow >= rollover && timeOnlyThen < rollover) {
                 then = then.AddDays(1);
             }
 
@@ -210,6 +212,9 @@ namespace OpenAstroAra.Sequencer.Conditions {
             Justification = "Time-determination boundary: the selected IDateTimeProvider and nighttime calculation may throw a provider-specific TimeProviderException or any other exception; the failure reason is captured and surfaced through Validate() rather than aborting. CA1031 sanctions general catches at such recover-and-report boundaries.")]
         private void UpdateTime() {
             try {
+                // #1155 — the provider setter is the one writer of RolloverTime (as in WaitForTime);
+                // a remaining-time READ consults the provider without assigning it.
+                RolloverTime = selectedProvider?.GetRolloverTime(this) ?? RolloverTime;
                 lastReferenceDate = NighttimeCalculator.GetReferenceDate(DateTime.Now);
                 if (HasFixedTimeProvider) {
                     var t = selectedProvider!.GetDateTime(this) + TimeSpan.FromMinutes(MinutesOffset);

@@ -15,6 +15,7 @@
 using Moq;
 using NUnit.Framework;
 using OpenAstroAra.Core.Enums;
+using OpenAstroAra.Sequencer;
 using OpenAstroAra.Sequencer.Conditions;
 using OpenAstroAra.Sequencer.Container;
 using OpenAstroAra.Sequencer.SequenceItem;
@@ -24,6 +25,10 @@ using OpenAstroAra.Equipment.Equipment.MyCamera;
 using OpenAstroAra.Equipment.Interfaces.Mediator;
 using OpenAstroAra.Server.Services;
 using System;
+using System.Threading.Tasks;
+using System.Threading;
+using OpenAstroAra.Core.Model;
+using System.Linq;
 
 namespace OpenAstroAra.Test {
 
@@ -31,6 +36,7 @@ namespace OpenAstroAra.Test {
     // walk the client used to do from the stored body (15 s nominal + exposure × iterations) and
     // the remaining-credit rules it never had.
     [TestFixture]
+    [NonParallelizable] // RunEtaEstimator.UtcNow is a process-wide test clock
     public class RunEtaEstimatorTest {
 
         private static ISequenceItem Leaf(double seconds, SequenceEntityStatus status = SequenceEntityStatus.CREATED) {
@@ -38,6 +44,164 @@ namespace OpenAstroAra.Test {
             m.SetupProperty(i => i.Status, status);
             m.Setup(i => i.GetEstimatedDuration()).Returns(TimeSpan.FromSeconds(seconds));
             return m.Object;
+        }
+
+        // #1155 — a leaf that DECLARES its duration model (zero means zero), optionally running since a moment.
+        private static ISequenceItem ModelledLeaf(double seconds, SequenceEntityStatus status = SequenceEntityStatus.CREATED, DateTimeOffset? runningSince = null, bool estimateIsRemaining = false) {
+            var m = new Mock<ISequenceItem>();
+            m.SetupProperty(i => i.Status, status);
+            m.Setup(i => i.GetEstimatedDuration()).Returns(TimeSpan.FromSeconds(seconds));
+            m.As<IEstimatesOwnDuration>().SetupGet(d => d.EstimateIsRemaining).Returns(estimateIsRemaining);
+            m.As<IRunningSince>().SetupGet(r => r.RunningSinceUtc).Returns(runningSince);
+            return m.Object;
+        }
+
+        [Test]
+        public void An_estimate_that_is_already_time_left_is_not_credited_a_second_time() {
+            // A "wait until 22:00" started at 21:00 reports 1800 s at 21:30; subtracting the 1800 s
+            // elapsed as well read 0 with half an hour still to wait.
+            var now = new DateTimeOffset(2026, 10, 13, 21, 30, 0, TimeSpan.Zero);
+            RunEtaEstimator.UtcNow = () => now;
+            try {
+                var root = new SequentialContainer();
+                root.Add(ModelledLeaf(1800, SequenceEntityStatus.RUNNING, runningSince: now.AddMinutes(-30), estimateIsRemaining: true));
+                root.Status = SequenceEntityStatus.RUNNING;
+                Assert.That(RunEtaEstimator.EstimateRemainingSeconds(root), Is.EqualTo(1800));
+            } finally {
+                RunEtaEstimator.UtcNow = () => DateTimeOffset.UtcNow;
+            }
+            var wait = new WaitForTime(new System.Collections.Generic.List<OpenAstroAra.Sequencer.Utility.DateTimeProvider.IDateTimeProvider>());
+            Assert.That(((IEstimatesOwnDuration)wait).EstimateIsRemaining, Is.True, "the real WaitForTime opts out of the credit");
+            Assert.That(((IEstimatesOwnDuration)new WaitForTimeSpan()).EstimateIsRemaining, Is.False, "a fixed-length wait is credited");
+        }
+
+        [Test]
+        public void Every_instruction_that_overrides_the_estimate_declares_the_contract() {
+            // #1155 — the point of the contract over the hand list: a type that models its duration but
+            // forgets the interface would silently cost the nominal again. Reflection keeps them honest.
+            var sequenceItem = typeof(OpenAstroAra.Sequencer.SequenceItem.SequenceItem);
+            var overriding = sequenceItem.Assembly.GetTypes()
+                .Where(t => !t.IsAbstract && sequenceItem.IsAssignableFrom(t)
+                    && t.GetMethod("GetEstimatedDuration", Type.EmptyTypes) is { } m && m.DeclaringType == t)
+                .ToList();
+            Assert.That(overriding, Is.Not.Empty);
+            Assert.That(overriding.Where(t => !typeof(IEstimatesOwnDuration).IsAssignableFrom(t)).Select(t => t.Name), Is.Empty,
+                "every instruction with its own duration model must implement IEstimatesOwnDuration");
+        }
+
+        [Test]
+        public void An_instruction_that_declares_its_duration_model_costs_its_honest_zero_and_an_undeclared_zero_costs_the_nominal() {
+            // The contract (#1155) replaces the hand list: SetReadoutMode-style truthful zeros cost 0,
+            // a bare mock with a Zero placeholder still costs the 15 s nominal.
+            var root = new SequentialContainer();
+            root.Add(ModelledLeaf(0));
+            root.Add(Leaf(0));
+            Assert.That(RunEtaEstimator.EstimateTotalSeconds(root), Is.EqualTo(RunEtaEstimator.NominalInstructionSeconds));
+            // The real instructions carry the contract.
+            Assert.That(new OpenAstroAra.Sequencer.SequenceItem.Camera.SetReadoutMode(null!), Is.InstanceOf<IEstimatesOwnDuration>());
+            Assert.That(new OpenAstroAra.Sequencer.SequenceItem.Camera.SetUSBLimit(null!), Is.InstanceOf<IEstimatesOwnDuration>());
+            Assert.That(new WaitForTimeSpan(), Is.InstanceOf<IEstimatesOwnDuration>());
+        }
+
+        [Test]
+        public void A_running_instruction_is_charged_only_its_unspent_part() {
+            var now = new DateTimeOffset(2026, 10, 13, 3, 0, 0, TimeSpan.Zero);
+            RunEtaEstimator.UtcNow = () => now;
+            try {
+                var root = new SequentialContainer();
+                root.Add(ModelledLeaf(300, SequenceEntityStatus.RUNNING, runningSince: now.AddSeconds(-250)));
+                root.Add(ModelledLeaf(300));
+                root.Status = SequenceEntityStatus.RUNNING;
+                Assert.That(RunEtaEstimator.EstimateRemainingSeconds(root), Is.EqualTo(50 + 300), "250 s of the running 300 s exposure are spent");
+                Assert.That(RunEtaEstimator.EstimateTotalSeconds(root), Is.EqualTo(600), "the total is the plan, not the clock");
+                var overrun = new SequentialContainer();
+                overrun.Add(ModelledLeaf(300, SequenceEntityStatus.RUNNING, runningSince: now.AddSeconds(-900)));
+                overrun.Status = SequenceEntityStatus.RUNNING;
+                Assert.That(RunEtaEstimator.EstimateRemainingSeconds(overrun), Is.EqualTo(0), "an overrun never goes negative");
+                var unstamped = new SequentialContainer();
+                unstamped.Add(ModelledLeaf(300, SequenceEntityStatus.RUNNING));
+                unstamped.Status = SequenceEntityStatus.RUNNING;
+                Assert.That(RunEtaEstimator.EstimateRemainingSeconds(unstamped), Is.EqualTo(300), "no stamp: charged in full, as before");
+            } finally {
+                RunEtaEstimator.UtcNow = () => DateTimeOffset.UtcNow;
+            }
+        }
+
+        [Test]
+        public void A_real_item_stamps_the_moment_it_starts_running() {
+            var item = new WaitForTimeSpan();
+            Assert.That(item.RunningSinceUtc, Is.Null);
+            item.Status = SequenceEntityStatus.RUNNING;
+            var first = item.RunningSinceUtc;
+            Assert.That(first, Is.Not.Null.And.GreaterThan(DateTimeOffset.UtcNow.AddMinutes(-1)));
+            item.Status = SequenceEntityStatus.RUNNING; // re-assigned (a future pause/resume): the stamp survives
+            Assert.That(item.RunningSinceUtc, Is.EqualTo(first));
+            item.Status = SequenceEntityStatus.FINISHED;
+            Assert.That(item.RunningSinceUtc, Is.Null, "cleared on every other transition");
+        }
+
+        // #1155 — a SequenceItem whose first attempt fails: records the running stamp each attempt sees.
+        private sealed class RetryProbe : OpenAstroAra.Sequencer.SequenceItem.SequenceItem {
+            public readonly System.Collections.Generic.List<DateTimeOffset?> StampsSeen = [];
+            private int _calls;
+            public override int Attempts { get => 2; set { } }
+            public override object Clone() => new RetryProbe();
+            public override async Task Execute(IProgress<ApplicationStatus> progress, CancellationToken token) {
+                StampsSeen.Add(RunningSinceUtc);
+                await Task.Delay(30, token); // let the clock move between attempts
+                if (++_calls == 1) {
+                    throw new InvalidOperationException("first attempt fails");
+                }
+            }
+        }
+
+        [Test]
+        public async Task Each_retry_attempt_restarts_the_running_clock() {
+            // A 300 s exposure that fails at 290 s and retries must owe its full length again, not 10 s:
+            // the stamp the second attempt runs under is later than the first's.
+            var item = new RetryProbe();
+            await item.Run(new Progress<ApplicationStatus>(), CancellationToken.None);
+            Assert.That(item.Status, Is.EqualTo(SequenceEntityStatus.FINISHED), "the second attempt succeeded");
+            Assert.That(item.StampsSeen, Has.Count.EqualTo(2));
+            Assert.That(item.StampsSeen[0], Is.Not.Null);
+            Assert.That(item.StampsSeen[1], Is.GreaterThan(item.StampsSeen[0]), "the retry re-stamped RunningSinceUtc");
+            Assert.That(item.RunningSinceUtc, Is.Null, "cleared on FINISHED");
+        }
+
+        [Test]
+        public void A_time_conditions_remaining_time_consults_the_provider_but_never_writes_RolloverTime() {
+            // #1155 — CalculateRemainingTime used to assign the observable RolloverTime from the provider on
+            // every read; UpdateTime() (the provider setter) is the only writer now.
+            var rollover = new TimeOnly(12, 0);
+            var provider = new Mock<OpenAstroAra.Sequencer.Utility.DateTimeProvider.IDateTimeProvider>();
+            provider.Setup(p => p.Name).Returns("test");
+            provider.Setup(p => p.GetDateTime(It.IsAny<ISequenceEntity>())).Returns(() => DateTime.Now.AddHours(1));
+            provider.Setup(p => p.GetRolloverTime(It.IsAny<ISequenceEntity>())).Returns(() => rollover);
+            var condition = new TimeCondition(new System.Collections.Generic.List<OpenAstroAra.Sequencer.Utility.DateTimeProvider.IDateTimeProvider> { provider.Object }, provider.Object);
+            Assert.That(condition.RolloverTime, Is.EqualTo(new TimeOnly(12, 0)), "the provider setter wrote it once");
+
+            rollover = new TimeOnly(6, 0); // the provider moves on; a remaining-time READ must not copy it in
+            provider.Invocations.Clear();
+            var remaining = condition.RemainingTime;
+
+            provider.Verify(p => p.GetRolloverTime(It.IsAny<ISequenceEntity>()), Times.AtLeastOnce, "the read still consults the provider's rollover");
+            Assert.That(condition.RolloverTime, Is.EqualTo(new TimeOnly(12, 0)), "a read is not a write to the live tree");
+            Assert.That(remaining, Is.GreaterThanOrEqualTo(TimeSpan.Zero));
+        }
+
+        [Test]
+        public void Disabled_leaves_are_not_part_of_the_instruction_count_either() {
+            // #1155 — instructions_total and the time estimate count the same items.
+            var root = new SequentialContainer();
+            root.Add(Leaf(10));
+            root.Add(Leaf(10, SequenceEntityStatus.DISABLED));
+            var block = new SequentialContainer();
+            block.Add(Leaf(10));
+            block.Status = SequenceEntityStatus.DISABLED;
+            root.Add(block);
+            var leaves = SequencerService.CollectLeaves(root);
+            Assert.That(leaves, Has.Count.EqualTo(1));
+            Assert.That(SequencerService.CountTerminalLeaves(leaves), Is.EqualTo(0));
         }
 
         private static SequentialContainer Loop(int iterations, int completed, params ISequenceItem[] items) {

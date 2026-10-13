@@ -39,7 +39,7 @@ namespace OpenAstroAra.Sequencer.SequenceItem.Utility {
     [ExportMetadata("Category", "Lbl_SequenceCategory_Utility")]
     [Export(typeof(ISequenceItem))]
     [JsonObject(MemberSerialization.OptIn)]
-    public partial class WaitForTime : SequenceItem, IValidatable {
+    public partial class WaitForTime : SequenceItem, IValidatable, IEstimatesOwnDuration {
         private IList<IDateTimeProvider> dateTimeProviders;
         private int hours;
         private int minutes;
@@ -189,6 +189,10 @@ namespace OpenAstroAra.Sequencer.SequenceItem.Utility {
         public override Task Execute(IProgress<ApplicationStatus> progress, CancellationToken token) {
             return OpenAstroAra.Core.Utility.CoreUtil.Wait(GetEstimatedDuration(), true, progress, "", token);
         }
+
+        /// <summary>The estimate below is target minus now: it already shrinks while running, so the
+        /// ETA must not subtract the elapsed time a second time (#1155).</summary>
+        public bool EstimateIsRemaining => true;
 
         public override TimeSpan GetEstimatedDuration() {
             var now = DateTime.Now;
