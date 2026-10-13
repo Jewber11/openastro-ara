@@ -60,6 +60,14 @@ namespace OpenAstroAra.Server.Services {
             StorageDeviceService.DefaultHelperPath,
             StorageDeviceService.DefaultHelperUnitTemplate,
             StorageDeviceService.DefaultRequestDirectory);
+
+        /// <summary>#1248 — the packaged layout, with the exchange directory overridable through
+        /// <c>OPENASTROARA_STORAGE_EXCHANGE_DIR</c> so the composition-root test can watch the boot
+        /// sweep run against a directory it owns. Unset (production) = <see cref="Default"/>.</summary>
+        public static StorageHelperPaths FromEnvironment() {
+            var dir = Environment.GetEnvironmentVariable(StorageDeviceService.ExchangeDirEnvVar);
+            return string.IsNullOrWhiteSpace(dir) ? Default : Default with { RequestDirectory = dir };
+        }
     }
 
     /// <summary>
@@ -84,6 +92,12 @@ namespace OpenAstroAra.Server.Services {
         /// <summary>Daemon-owned exchange directory (tmpfiles.d): <c>&lt;id&gt;.request</c>
         /// in, <c>&lt;id&gt;.result</c> out.</summary>
         internal const string DefaultRequestDirectory = "/run/openastroara/storage";
+        internal const string ExchangeDirEnvVar = "OPENASTROARA_STORAGE_EXCHANGE_DIR";
+        /// <summary>#1248 — the boot sweep leaves files younger than this alone: a daemon restart
+        /// while a previous <c>openastroara-storage@</c> unit is still formatting would otherwise
+        /// sweep before that unit writes its result (harmless — ids are unique — but the file then
+        /// sat in tmpfs until reboot; now the next boot sweep takes it).</summary>
+        internal static readonly TimeSpan SweepMinimumAge = TimeSpan.FromMinutes(5);
 
         private readonly ILogger logger;
         private readonly StorageHelperPaths paths;
@@ -98,7 +112,7 @@ namespace OpenAstroAra.Server.Services {
         internal Func<bool?> StoreMounted { get; set; } = StoreMountProbe.IsStoreMounted;
 
         public StorageDeviceService(ILogger<StorageDeviceService> logger)
-            : this(logger, StorageHelperPaths.Default, null) {
+            : this(logger, StorageHelperPaths.FromEnvironment(), null) {
         }
 
         internal StorageDeviceService(ILogger<StorageDeviceService> logger, StorageHelperPaths paths,
@@ -106,6 +120,12 @@ namespace OpenAstroAra.Server.Services {
             this.logger = logger;
             this.paths = paths;
             this.run = run ?? RunAsync;
+            if (!string.Equals(paths.RequestDirectory, DefaultRequestDirectory, StringComparison.Ordinal)
+                    && File.Exists(paths.HelperUnitTemplate)) {
+                // #1248 r1 — the root unit still reads /run/openastroara/storage: with the exchange
+                // directory moved on a packaged install every request would time out silently.
+                LogExchangeDirectoryOverridden(logger, paths.RequestDirectory, DefaultRequestDirectory);
+            }
             SweepStaleExchangeFiles();
         }
 
@@ -134,6 +154,9 @@ namespace OpenAstroAra.Server.Services {
                     var ext = Path.GetExtension(file);
                     if (ext is not (".request" or ".result")) {
                         continue; // not ours — the directory is tmpfiles.d-owned, but stay narrow
+                    }
+                    if (DateTime.UtcNow - File.GetLastWriteTimeUtc(file) < SweepMinimumAge) {
+                        continue; // a unit from before the restart may still be writing its result
                     }
                     try {
                         File.Delete(file);
@@ -563,6 +586,9 @@ namespace OpenAstroAra.Server.Services {
 
         [LoggerMessage(Level = LogLevel.Warning, Message = "Storage configure for UUID {Uuid} failed: {Code} {Detail}.")]
         private static partial void LogConfigureFailed(ILogger logger, string uuid, string code, string detail);
+
+        [LoggerMessage(Level = LogLevel.Warning, Message = "Storage exchange directory is {Directory} (OPENASTROARA_STORAGE_EXCHANGE_DIR), but the root helper unit reads {Default}: storage requests will time out. This override is for tests.")]
+        private static partial void LogExchangeDirectoryOverridden(ILogger logger, string directory, string @default);
 
         [LoggerMessage(Level = LogLevel.Information, Message = "Storage exchange: swept {Count} stale request/result file(s) from {Directory} (#1135).")]
         private static partial void LogStaleExchangeSwept(ILogger logger, int count, string directory);
