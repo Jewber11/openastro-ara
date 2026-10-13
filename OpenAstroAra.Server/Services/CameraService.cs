@@ -1470,6 +1470,11 @@ public sealed partial class CameraService : ICameraService, IRetainedDeviceSourc
         _ => waxing ? "Waxing Gibbous" : "Waning Gibbous",
     };
 
+    /// <summary>#1231 test seam for <see cref="StoreEjected"/>: the store-mount probe. The default
+    /// answers null off Linux (no /proc), which reads as "not ejected" — the same outcome the old
+    /// explicit OS guard produced.</summary>
+    internal Func<bool?> StoreMountedProbe { get; set; } = StoreMountProbe.IsStoreMounted;
+
     /// <summary>
     /// True when the configured save directory sits under the §29 store
     /// mount point but nothing is mounted there — i.e. the drive was
@@ -1477,7 +1482,7 @@ public sealed partial class CameraService : ICameraService, IRetainedDeviceSourc
     /// "Mounted" means a filesystem of its own, not merely a line at the
     /// path — systemd binds the empty directory into the service namespace
     /// after a restart with no disk (#1207; see <see cref="StoreMountProbe"/>).
-    /// Best-effort: an unreadable /proc/self/mounts never blocks capture.
+    /// Best-effort: an unreadable mount table (mountinfo, then mounts) never blocks capture.
     /// </summary>
     [SuppressMessage("Design", "CA1031:Do not catch general exception types",
         Justification = "Best-effort pre-capture probe over profile + /proc reads; a probe fault must degrade to 'capture proceeds'. CA1031's log-and-recover boundary applies.")]
@@ -1485,7 +1490,7 @@ public sealed partial class CameraService : ICameraService, IRetainedDeviceSourc
         const string mountPoint = StoreMountProbe.MountPoint;
         saveDirectory = string.Empty;
         try {
-            if (_profileStore is null || !OperatingSystem.IsLinux()) {
+            if (_profileStore is null) {
                 return false;
             }
             var dir = _profileStore.GetStorageSettings().SaveDirectory;
@@ -1496,7 +1501,7 @@ public sealed partial class CameraService : ICameraService, IRetainedDeviceSourc
             saveDirectory = dir;
             // null (unreadable table) → "not ejected": a probe fault must
             // never cost the user a frame.
-            return StoreMountProbe.IsStoreMounted() == false;
+            return StoreMountedProbe() == false;
         } catch (Exception ex) {
             LogPreCaptureDiskProbeFailed(ex);
             return false;
@@ -1520,7 +1525,9 @@ public sealed partial class CameraService : ICameraService, IRetainedDeviceSourc
             if (string.IsNullOrWhiteSpace(storage.SaveDirectory)) {
                 return false; // fallback-dir captures are dev-box territory — the monitor doesn't watch it either
             }
-            var free = DiskSpaceMonitor.TryGetFreeBytes(storage.SaveDirectory);
+            // #1231 — the same probe StoreEjected uses (one seam for tests): under an ejected store
+            // there is no volume to measure, so the gate stays open and StoreEjected refuses the frame.
+            var free = DiskSpaceMonitor.TryGetFreeBytes(storage.SaveDirectory, StoreMountedProbe);
             if (free is null) {
                 return false;
             }

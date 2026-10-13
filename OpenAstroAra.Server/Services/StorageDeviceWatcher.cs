@@ -24,8 +24,9 @@ namespace OpenAstroAra.Server.Services;
 /// §29 — notices a storage drive being plugged or pulled and tells live
 /// clients. Polls two cheap kernel views every 5 s (no exec, no privilege):
 /// the block-device names under <c>/sys/block</c> and whether a disk of its
-/// own is mounted at the ARA store path per <c>/proc/self/mounts</c> (a line
-/// alone is not enough — see <see cref="StoreMountProbe"/>). On any change it broadcasts
+/// own is mounted at the ARA store path per the daemon's mount table
+/// (<see cref="StoreMountProbe"/>: mountinfo device numbers and bind roots,
+/// with a sysfs liveness check; a line at the path alone is not enough). On any change it broadcasts
 /// <c>storage.devices_changed</c> — clients re-fetch their device/space
 /// state, so an unplugged drive shows as gone within seconds instead of
 /// whenever something happened to refresh.
@@ -92,20 +93,28 @@ public sealed partial class StorageDeviceWatcher : BackgroundService {
 
     /// <summary>Block-device names + store-mount presence as one comparable
     /// string; null when the kernel views are momentarily unreadable.</summary>
-    private static string? TrySnapshot() {
+    private string? TrySnapshot() {
         try {
             var blocks = Directory.GetDirectories("/sys/block")
                 .Select(Path.GetFileName)
                 .Where(n => n is not null)
                 .OrderBy(n => n, StringComparer.Ordinal);
-            var mounted = StoreMountProbe.IsStoreMounted();
-            if (mounted is null) {
-                return null;
-            }
-            return string.Join(',', blocks) + "|store=" + (mounted.Value ? "1" : "0");
+            return BuildSnapshot(blocks!, StoreMounted());
         } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or DirectoryNotFoundException) {
             return null;
         }
+    }
+
+    /// <summary>#1231 test seam: the store-mount probe (null = unknown this tick).</summary>
+    internal Func<bool?> StoreMounted { get; set; } = StoreMountProbe.IsStoreMounted;
+
+    /// <summary>Pure: block names + store presence as one comparable string; null when the probe
+    /// could not answer, so the tick is skipped rather than diffed against a guess (#1231).</summary>
+    internal static string? BuildSnapshot(IEnumerable<string> blockNames, bool? storeMounted) {
+        if (storeMounted is null) {
+            return null;
+        }
+        return string.Join(',', blockNames) + "|store=" + (storeMounted.Value ? "1" : "0");
     }
 
     [LoggerMessage(Level = LogLevel.Information, Message = "Storage devices changed: {Before} -> {After}.")]
