@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -10,6 +12,8 @@ import 'package:openastroara/models/tracking_calibration.dart';
 import 'package:openastroara/screens/settings/panels/imaging_unguided_panel.dart';
 import 'package:openastroara/state/saved_server_state.dart';
 import 'package:openastroara/state/tracking/tracking_calibration_state.dart';
+import 'package:openastroara/state/settings/unguided_settings_state.dart';
+import 'package:openastroara/widgets/settings/editable_field.dart';
 
 /// #1264 Imaging → Unguided: the stored ceiling, its ladder and Recalibrate.
 class _Fixed extends TrackingCalibrationNotifier {
@@ -26,10 +30,11 @@ class _Fixed extends TrackingCalibrationNotifier {
 }
 
 class _SeededMount extends MountNotifier {
-  _SeededMount(this._v);
+  _SeededMount(this._v, {this.neverLoads = false});
   final MountStatus? _v;
+  final bool neverLoads;
   @override
-  Future<MountStatus?> build() async => _v;
+  Future<MountStatus?> build() => neverLoads ? Completer<MountStatus?>().future : Future.value(_v);
 }
 
 MountStatus _mount(MountSpecSheet? specs) => MountStatus(
@@ -47,6 +52,7 @@ Future<_Fixed> _pump(
   TrackingCalibration? cal,
   MountSpecSheet? specs,
   bool mountKnown = false,
+  bool mountLoading = false,
 }) async {
   tester.view.physicalSize = const Size(1600, 1600);
   tester.view.devicePixelRatio = 1.0;
@@ -59,7 +65,7 @@ Future<_Fixed> _pump(
           connected ? const AraServer(hostname: 'rig', port: 5555) : null,
         ),
         trackingCalibrationProvider.overrideWith(() => notifier),
-        mountProvider.overrideWith(() => _SeededMount(mountKnown ? _mount(specs) : null)),
+        mountProvider.overrideWith(() => _SeededMount(mountKnown ? _mount(specs) : null, neverLoads: mountLoading)),
       ],
       child: MaterialApp(
         builder: (context, child) => MediaQuery(
@@ -162,5 +168,39 @@ void main() {
     await tester.pumpWidget(const SizedBox());
     await _pump(tester, connected: true, mountKnown: true);
     expect(find.textContaining('No spec sheet for this mount'), findsOneWidget);
+  });
+
+  testWidgets('#1264 the knobs edit the Unguided settings (guard switch, ladder text)', (tester) async {
+    await _pump(tester, connected: true, mountKnown: true);
+    final element = tester.element(find.byType(ImagingUnguidedPanel));
+    final container = ProviderScope.containerOf(element);
+
+    await tester.tap(find.descendant(
+        of: find.widgetWithText(SettingsSwitchRow, 'Unguided exposure guard'), matching: find.byType(Switch)));
+    await tester.pumpAndSettle();
+    expect(container.read(unguidedSettingsProvider).guardEnabled, isFalse);
+    expect(find.textContaining("Off: the probe's ceiling holds"), findsOneWidget);
+
+    final ladder = find.widgetWithText(EditableTextRow, 'Probe ladder (s, shortest first)');
+    await tester.scrollUntilVisible(ladder, 200, scrollable: find.byType(Scrollable).first);
+    await tester.enterText(find.descendant(of: ladder, matching: find.byType(TextField)), '5, 20, 80');
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pumpAndSettle();
+    expect(container.read(unguidedSettingsProvider).probeRungsSeconds, [5, 20, 80]);
+
+    await tester.enterText(find.descendant(of: ladder, matching: find.byType(TextField)), '80, 5');
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pumpAndSettle();
+    expect(container.read(unguidedSettingsProvider).probeRungsSeconds, [5, 20, 80], reason: 'a descending ladder is rejected');
+  });
+
+  testWidgets('#1264 the spec-sheet row tells a missing mount and a loading one apart from "no sheet"', (tester) async {
+    await _pump(tester, connected: true);
+    expect(find.text('Mount not connected.'), findsOneWidget);
+    expect(find.textContaining('No spec sheet'), findsNothing);
+
+    await tester.pumpWidget(const SizedBox());
+    await _pump(tester, connected: true, mountLoading: true);
+    expect(find.text('Reading the mount…'), findsOneWidget);
   });
 }

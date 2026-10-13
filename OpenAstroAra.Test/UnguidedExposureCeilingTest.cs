@@ -224,9 +224,25 @@ namespace OpenAstroAra.Test {
             Assert.That(executor.Request!.RungsSeconds, Is.EqualTo(new[] { 10.0, 30, 40 }), "capped at 2 × the 20 s prior");
             Assert.That(executor.Request.PriorSeconds, Is.EqualTo(20));
             Assert.That(executor.Request.PriorSource, Is.EqualTo("the sequence's own prior"), "the executor names the source (#1264 stage 1)");
+            Assert.That(executor.Request.EccentricityTolerance, Is.EqualTo(0.5), "the node's shipped trailed bar reaches the request");
             Assert.That(probe.CeilingSeconds, Is.EqualTo(45));
             Assert.That(exposure.ExposureTime, Is.EqualTo(45));
             Assert.That(count.Iterations, Is.EqualTo((int)Math.Ceiling(3000.0 / 45)));
+        }
+
+        [Test]
+        public async Task The_node_passes_its_trailed_bar_to_the_request_and_zero_falls_back() {
+            var executor = new ScriptedProbe { Result = new TrackingProbeResult(45, 3, "measured") };
+            var (_, probe, _, _, _) = Tree(Factory(executor), exposureSeconds: 300, frames: 10, maxExposure: 300);
+            probe.EccentricityTolerance = 0.6;
+            await probe.Execute(new Progress<ApplicationStatus>(), CancellationToken.None);
+            Assert.That(executor.Request!.EccentricityTolerance, Is.EqualTo(0.6), "the body's bar reaches the daemon");
+
+            var zero = new ScriptedProbe { Result = new TrackingProbeResult(45, 3, "measured") };
+            var (_, probe2, _, _, _) = Tree(Factory(zero), exposureSeconds: 300, frames: 10, maxExposure: 300);
+            probe2.EccentricityTolerance = 0;
+            await probe2.Execute(new Progress<ApplicationStatus>(), CancellationToken.None);
+            Assert.That(zero.Request!.EccentricityTolerance, Is.EqualTo(UnguidedExposureLadder.DefaultEccentricityTolerance), "a zeroed bar means the shipped one");
         }
 
         [Test]

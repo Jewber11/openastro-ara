@@ -13,6 +13,7 @@
 #endregion "copyright"
 
 using OpenAstroAra.Core.Model;
+using OpenAstroAra.Sequencer.Utility;
 using System;
 using System.Collections.Generic;
 using System.Threading;
@@ -28,7 +29,9 @@ namespace OpenAstroAra.Sequencer.SequenceItem.Telescope {
         double MaxExposureSeconds,
         double? PriorSeconds,
         string? TargetName,
-        string? PriorSource = null);
+        string? PriorSource = null,
+        // #1264 Imaging → Unguided — a rung is "trailed" above this median eccentricity (0.5 shipped).
+        double EccentricityTolerance = UnguidedExposureLadder.DefaultEccentricityTolerance);
 
     /// <summary>The probe's answer. <see cref="CeilingSeconds"/> null = inconclusive (fewer than two usable
     /// rungs and none of them failed), so the prior (if any) stands; a first rung that already trails IS a

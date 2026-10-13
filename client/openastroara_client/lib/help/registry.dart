@@ -2215,9 +2215,10 @@ const Map<String, Help> helpRegistry = {
     key: 'img.unguided.probe',
     title: 'Tracking probe',
     body:
-        'A ladder of exposures at the target — 10, 30, 60 and 120 s, then the planned sub or twice the prior '
-        '(whichever is lower) as a final rung; nothing longer than that cap is tried. Each frame is judged by '
-        'the same star analysis autofocus uses: a rung passes when the median eccentricity stays at or under 0.5 '
+        'A ladder of exposures at the target — your Imaging → Unguided ladder (10, 30, 60 and 120 s as shipped), '
+        'then the planned sub or twice the prior (whichever is lower) as a final rung; nothing longer than that '
+        'cap is tried. Each frame is judged by the same star analysis autofocus uses: a rung passes when the '
+        'median eccentricity stays at or under your trailed bar (0.5 as shipped) '
         'and the FWHM within 1.2× the first usable rung\'s. Too few stars makes a rung unusable, not a fail. '
         'The ceiling is the longest passing rung, moved halfway toward the first failing one. When even the '
         'first usable rung trails, that rung IS the ceiling (nothing shorter was tried; the guard can still step '
@@ -2231,11 +2232,12 @@ const Map<String, Help> helpRegistry = {
     key: 'img.unguided.guard',
     title: 'Unguided exposure guard',
     body:
-        'Watches each unguided imaging loop. Two consecutive lights over the eccentricity tolerance step the '
-        'exposure down one rung (those frames are tagged "trailed" and you get one notification); ten consecutive '
-        'round ones (eccentricity 0.3 or better) below the sky-limited length step it back up. On the same rigs '
-        'Center After Drift plate-solves every saved light and re-centres the target once it has drifted more than '
-        '10 arcminutes — a run that drifts less is left alone.',
+        'Watches each unguided imaging loop. A run of trailed lights (over your trailed bar; two as shipped) steps '
+        'the exposure down one rung — those frames are tagged "trailed" and you get one notification — and a run '
+        'of round ones (at or under your round bar; ten at 0.3 as shipped) below the sky-limited length steps it '
+        'back up. On the same rigs Center After Drift plate-solves every Nth saved light and re-centres the target '
+        'once it has drifted past your threshold (10 arcminutes as shipped) — a run that drifts less is left alone. '
+        'All of these are set on Imaging → Unguided.',
     relatedHelpKeys: ['img.unguided.ceiling', 'img.unguided.probe'],
   ),
 
@@ -2272,5 +2274,58 @@ const Map<String, Help> helpRegistry = {
         'and follow your scope\'s own collimation procedure for the adjustment. Refractors and in-focus fields '
         'produce no donut and get no verdict.',
     keywords: ['collimation', 'donut', 'secondary mirror', 'tilt', 'sct', 'newtonian'],
+  ),
+
+  // ── Unguided knobs (img.unguided, #1264) ───────────────────────────────
+  'img.unguided.guard_enabled': Help(
+    key: 'img.unguided.guard_enabled',
+    title: 'Unguided exposure guard',
+    body:
+        'On a rig without a guider the guard watches each imaging loop: after the configured run of trailed '
+        'lights it shortens the exposure one rung (and tags those frames "trailed", with one notification); '
+        'after a run of round lights it steps back up, never past the planned sub. Turn it off to keep the '
+        'Tracking Probe\'s ceiling for the whole loop — the probe and the re-centre stay.',
+    relatedSettings: ['img.unguided.guard_enabled', 'img.unguided.step_down_after', 'img.unguided.step_up_after'],
+  ),
+  'img.unguided.eccentricity': Help(
+    key: 'img.unguided.eccentricity',
+    title: 'Trailed and round',
+    body:
+        'Star eccentricity is 0 for a perfect disc and rises as stars stretch into lines. Ara reads the median '
+        'over a frame\'s stars. A light above the trailed bar counts against the exposure (the probe fails the '
+        'rung, the guard counts a trailed light); one at or under the round bar counts for it (the guard may '
+        'step up). Keep the round bar below the trailed bar; 0.5 / 0.3 are the shipped figures, 0.6 / 0.35 is '
+        'lenient for a long focal length in poor seeing.',
+    relatedSettings: ['img.unguided.eccentricity_tolerance', 'img.unguided.good_eccentricity'],
+  ),
+  'img.unguided.probe_rungs': Help(
+    key: 'img.unguided.probe_rungs',
+    title: 'Probe ladder',
+    body:
+        'The exposures the Tracking Probe tries at the target, shortest first, as a comma-separated list in '
+        'seconds. The planned sub or twice the prior caps the ladder and becomes its final rung; the guard '
+        'steps along the same rungs during the run. Fewer, wider rungs make a faster probe with a coarser '
+        'ceiling; more rungs cost a frame each at run start.',
+    relatedSettings: ['img.unguided.probe_rungs'],
+  ),
+  'img.unguided.recentre': Help(
+    key: 'img.unguided.recentre',
+    title: 'Re-centre after drift',
+    body:
+        'Unguided runs drift off the framing over the hours. Center After Drift plate-solves every Nth saved '
+        'light and, once the field has drifted further than the threshold, slews and centres before the next '
+        'one. A tighter threshold keeps the framing but costs the occasional re-centre; raise it for a wide '
+        'field where a few arcminutes do not matter.',
+    relatedSettings: ['img.unguided.recentre_drift_arcmin', 'img.unguided.recentre_solve_every_n'],
+  ),
+  'img.unguided.prior_tolerance': Help(
+    key: 'img.unguided.prior_tolerance',
+    title: 'Spec-sheet prior tolerance',
+    body:
+        'Before the first probe has measured anything, the mount\'s spec sheet (periodic error over its worm '
+        'period, plus your latest polar-align residual) gives a starting ceiling: the time until the drift '
+        'exceeds a tolerance. "Larger of one pixel or half the seeing" is the shipped basis; "One pixel" is '
+        'strict on well-sampled rigs; "Half the seeing disc" is strict on undersampled ones. The probe measures the real figure on the night either way.',
+    relatedSettings: ['img.unguided.prior_tolerance_basis'],
   ),
 };

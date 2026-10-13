@@ -41,8 +41,9 @@ public sealed partial class TrackingProbeService : ITrackingProbeExecutor {
 
     /// <summary>A rung needs this many stars to be judged (the §59.5 statistic bar, not the autofocus bar).</summary>
     internal const int MinStars = CameraService.MinStarsForAnalysis;
-    /// <summary>A rung passes when its median eccentricity is at or under this (issue #1264).</summary>
-    internal const double EccentricityTolerance = 0.5;
+    /// <summary>A rung passes when its median eccentricity is at or under the request's tolerance; this is
+    /// the shipped bar when the request carries none (issue #1264, Imaging → Unguided).</summary>
+    internal const double EccentricityTolerance = OpenAstroAra.Sequencer.Utility.UnguidedExposureLadder.DefaultEccentricityTolerance;
     /// <summary>…and its median FWHM is at most this × the first usable rung's (trailing fattens stars too).</summary>
     internal const double FwhmGrowth = 1.2;
     /// <summary>Measured ceiling more than this × off the prior (either way) raises a notification.</summary>
@@ -151,7 +152,8 @@ public sealed partial class TrackingProbeService : ITrackingProbeExecutor {
         var pixelScale = PixelScaleArcsec(_profiles.GetOpticsSettings());
         var seeing = _profiles.GetSiteSettings()?.TypicalSeeingArcsec;
         var polarAlign = await LatestPolarAlignErrorAsync(token).ConfigureAwait(false);
-        var seconds = MountSpecSheet.UnguidedPriorSeconds(sheet, pixelScale, seeing, polarAlign);
+        var basis = _profiles.GetUnguidedSettings().PriorToleranceBasis;
+        var seconds = MountSpecSheet.UnguidedPriorSeconds(sheet, pixelScale, seeing, polarAlign, basis);
         if (seconds is null) {
             return (null, null);
         }
@@ -184,7 +186,8 @@ public sealed partial class TrackingProbeService : ITrackingProbeExecutor {
             var features = _metric(frame, token);
             var usable = features.StarCount >= MinStars && features.MedianFWHM > 0 && !double.IsNaN(features.MedianFWHM);
             var ecc = usable ? Eccentricity(features.MedianRoundness) : double.NaN;
-            var passed = usable && !double.IsNaN(ecc) && ecc <= EccentricityTolerance
+            var tolerance = request.EccentricityTolerance > 0 ? request.EccentricityTolerance : EccentricityTolerance;
+            var passed = usable && !double.IsNaN(ecc) && ecc <= tolerance
                 && (referenceFwhm is not double reference || features.MedianFWHM <= FwhmGrowth * reference);
             if (usable && referenceFwhm is null) {
                 referenceFwhm = features.MedianFWHM;
