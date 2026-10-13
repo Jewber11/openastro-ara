@@ -10,19 +10,18 @@ import '../../models/sequence/sequence_summary.dart';
 import '../../state/sequencer/draft_sequences_state.dart';
 import '../../state/sequencer/sequence_editor_state.dart';
 import '../../state/sequencer/sequence_list_state.dart';
+import '../../state/ws/ws_providers.dart';
 import '../../theme/ara_colors.dart';
-import '../../widgets/sequencer/sequence_editor_tree.dart';
-import '../../widgets/sequencer/sequence_field_editor.dart';
-import '../../widgets/sequencer/sequencer_palette.dart';
+import '../../theme/ara_metrics.dart';
 import '../../widgets/sequencer/run_completion_sheet.dart';
 import '../../widgets/sequencer/run_dashboard_band.dart';
+import '../../widgets/sequencer/sequence_editor_tree.dart';
+import '../../widgets/sequencer/sequence_field_editor.dart';
 import '../../widgets/sequencer/sequence_load_dialog.dart';
 import '../../widgets/sequencer/sequence_new_dialog.dart';
-import '../../state/app_shell_state.dart';
-import '../../state/settings/settings_nav.dart';
-import '../../state/ws/ws_providers.dart';
-import '../../theme/ara_metrics.dart';
+import '../../widgets/sequencer/sequencer_palette.dart';
 import '../../widgets/sequencer/sequencer_toolbar.dart';
+import '../../widgets/sky_atlas/session_plan_dialog.dart';
 
 /// Sequencer tab per playbook §25.5.3 / §38: toolbar + the NINA-style edit
 /// surface — instruction palette, the raw-body tree, and the selected node's
@@ -329,8 +328,8 @@ class _SequencerTabState extends ConsumerState<SequencerTab> {
     // §38.10 — a keyboard resume offers the same re-center/refocus choice as
     // the toolbar button (one path, one dialog).
     unawaited(isPaused
-        ? promptAndResumeSequence(context, ref)
-        : preflightAndRunSequence(context, ref));
+        ? promptAndResumeSequence(context, ref.read)
+        : preflightAndRunSequence(context, ref.read));
     return true;
   }
 
@@ -343,11 +342,11 @@ class _SequencerTabState extends ConsumerState<SequencerTab> {
     if (!_lifecycleKeysArmed) return false;
     final state = ref.read(sequenceRunStateProvider).value?.state;
     if (state == SequenceRunState.running) {
-      unawaited(runSequenceLifecycle(context, ref, (api, id) => api.pause(id)));
+      unawaited(runSequenceLifecycle(context, ref.read, (api, id) => api.pause(id)));
       return true;
     }
     if (state?.isAnyPaused ?? false) {
-      unawaited(promptAndResumeSequence(context, ref));
+      unawaited(promptAndResumeSequence(context, ref.read));
       return true;
     }
     return false;
@@ -424,9 +423,12 @@ class _ZeroState extends ConsumerWidget {
                 FilledButton.icon(
                   icon: const Icon(Icons.auto_awesome, size: 16),
                   label: const Text('Plan tonight'),
-                  onPressed: () => ref
-                      .read(selectedTabIndexProvider.notifier)
-                      .select(kPlanningTabIndex),
+                  // #1154 item 11 — straight into the session planner (its
+                  // "Show on atlas" takes the user to the planetarium itself).
+                  onPressed: () => showDialog<void>(
+                    context: context,
+                    builder: (_) => const SessionPlanDialog(),
+                  ),
                 ),
                 const SizedBox(width: AraSpace.s12),
                 OutlinedButton.icon(

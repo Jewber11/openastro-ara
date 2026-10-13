@@ -1,19 +1,26 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../help/registry.dart';
+import '../models/sequence/draft_sequence.dart';
+import '../models/sequence/sequence_summary.dart';
 import '../screens/calibration/calibration_screen.dart';
 import '../screens/library/image_library_screen.dart';
 import '../screens/stats/stats_dashboard_screen.dart';
 import '../screens/wizard/wizard_shell.dart';
-import 'notifications/notification_center.dart';
 import '../state/app_shell_state.dart';
+import '../state/sequencer/sequence_list_state.dart';
 import '../state/settings/settings_nav.dart';
 import '../state/settings/settings_search.dart';
 import '../theme/ara_colors.dart';
 import 'backup/backup_restore_modal.dart';
 import 'help_icon.dart';
+import 'notifications/notification_center.dart';
+import 'sequencer/sequencer_toolbar.dart';
+import 'sky_atlas/session_plan_dialog.dart';
 
 /// §61 ⌘K command palette. Opens as a centered dialog, indexes
 /// `settingsTree` via `buildSearchIndex()`, and on enter/click jumps to
@@ -94,8 +101,12 @@ class _CommandPaletteDialogState extends ConsumerState<_CommandPaletteDialog> {
     // (this widget's context dies with the pop, same as the help-sheet flow).
     if (entry.actionId != null) {
       final rootContext = Navigator.of(context, rootNavigator: true).context;
+      // #1154 r1 — the run helpers await a dialog and read providers after
+      // it; by then this widget (and its ref) is gone. Hand them the root
+      // container, which outlives the palette.
+      final container = ProviderScope.containerOf(context);
       Navigator.of(context).pop();
-      _runAction(rootContext, entry.actionId!);
+      _runAction(rootContext, container, entry.actionId!);
       return;
     }
     // §61.10 — a navigation hit just switches the main tab.
@@ -115,10 +126,85 @@ class _CommandPaletteDialogState extends ConsumerState<_CommandPaletteDialog> {
     Navigator.of(context).pop();
   }
 
+  /// The Run tab's lifecycle-key gate (a saved, non-draft sequence selected
+  /// on a connected rig, no command in flight), with a sentence where the
+  /// keys stay silent — ⌘K has no toolbar in view to explain itself.
+  static bool _runArmed(BuildContext rootContext, ProviderContainer ref) {
+    final id = ref.read(selectedSequenceIdProvider);
+    final armed = ref.read(sequenceApiProvider) != null &&
+        id != null &&
+        !isDraftSequenceId(id) &&
+        !ref.read(sequenceCommandBusyProvider);
+    if (!armed) {
+      ScaffoldMessenger.maybeOf(rootContext)?.showSnackBar(
+        const SnackBar(content: Text('Select a saved sequence on a connected rig first.')),
+      );
+    }
+    return armed;
+  }
+
+  /// The run state is autoDispose and only the Run tab keeps it alive; when
+  /// that tab was never built a bare read sees loading. Hold a listen and
+  /// wait for the value before branching (r2 note). A failed load branches on
+  /// null, which the helpers treat as "not running".
+  static Future<void> _withRunState(
+      ProviderContainer ref, Future<void> Function(SequenceRunState? state) then) async {
+    final sub = ref.listen(sequenceRunStateProvider, (_, _) {});
+    try {
+      SequenceRunState? state;
+      try {
+        state = (await ref.read(sequenceRunStateProvider.future))?.state;
+      } catch (_) {
+        state = null;
+      }
+      // The helpers refresh the run state after the command, so the listen
+      // must outlive them too.
+      await then(state);
+    } finally {
+      sub.close();
+    }
+  }
+
   // The id → launcher switch for the palette's action hits. Mirrors the
-  // top-bar buttons in app_shell.dart — same routes, same dialog.
-  static void _runAction(BuildContext rootContext, String actionId) {
+  // top-bar buttons in app_shell.dart — same routes, same dialog. The run
+  // actions (#1154) go through the Run tab's own helpers, so ⌘K and the key
+  // shortcuts take exactly one path to the daemon.
+  static void _runAction(BuildContext rootContext, ProviderContainer ref, String actionId) {
     switch (actionId) {
+      case 'action.run.start':
+        ref.read(selectedTabIndexProvider.notifier).select(kRunTabIndex);
+        if (!_runArmed(rootContext, ref)) return;
+        unawaited(_withRunState(ref, (state) async {
+          if (state?.isAnyPaused ?? false) {
+            await promptAndResumeSequence(rootContext, ref.read);
+          } else if (state?.isActive ?? false) {
+            ScaffoldMessenger.maybeOf(rootContext)?.showSnackBar(
+              const SnackBar(content: Text('The sequence is already running — Space pauses it.')),
+            );
+          } else {
+            await preflightAndRunSequence(rootContext, ref.read);
+          }
+        }));
+      case 'action.run.pause':
+        ref.read(selectedTabIndexProvider.notifier).select(kRunTabIndex);
+        if (!_runArmed(rootContext, ref)) return;
+        unawaited(_withRunState(ref, (state) async {
+          if (state == SequenceRunState.running) {
+            await runSequenceLifecycle(rootContext, ref.read, (api, id) => api.pause(id));
+          } else if (state?.isAnyPaused ?? false) {
+            await promptAndResumeSequence(rootContext, ref.read);
+          } else {
+            ScaffoldMessenger.maybeOf(rootContext)?.showSnackBar(
+              const SnackBar(content: Text('No sequence is running — ⌘R starts the selected one.')),
+            );
+          }
+        }));
+      case 'action.plan.tonight':
+        ref.read(selectedTabIndexProvider.notifier).select(kPlanningTabIndex);
+        showDialog<void>(
+          context: rootContext,
+          builder: (_) => const SessionPlanDialog(),
+        );
       case 'action.library':
         Navigator.of(rootContext).push(
           MaterialPageRoute<void>(builder: (_) => const ImageLibraryScreen()),
