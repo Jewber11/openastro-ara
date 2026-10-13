@@ -87,6 +87,11 @@ namespace OpenAstroAra.Test {
             // The default and anything unrecognised mean warn-only (safe).
             Assert.That(DiskSpaceMonitor.ShouldAbortSequence("warn"), Is.False);
             Assert.That(DiskSpaceMonitor.ShouldAbortSequence("pause"), Is.False);
+            Assert.That(DiskSpaceMonitor.ShouldPauseSequence(" Pause "), Is.True, "#1185 — pause is its own policy");
+            Assert.That(DiskSpaceMonitor.ShouldPauseSequence("abort"), Is.False);
+            Assert.That(DiskSpaceMonitor.ShouldStopCaptures("pause"), Is.True);
+            Assert.That(DiskSpaceMonitor.ShouldStopCaptures("abort"), Is.True);
+            Assert.That(DiskSpaceMonitor.ShouldStopCaptures("warn"), Is.False);
             Assert.That(DiskSpaceMonitor.ShouldAbortSequence(""), Is.False);
             Assert.That(DiskSpaceMonitor.ShouldAbortSequence(null), Is.False);
         }
@@ -186,6 +191,48 @@ namespace OpenAstroAra.Test {
         }
 
         [Test]
+        public async Task EmitTransition_into_Critical_with_pause_policy_pauses_and_records_auto_action() {
+            // #1185 — the pause policy: PauseActiveRunsAsync, the diagnostic's auto-action and the critical
+            // "Sequence paused" notification (r1 finding: the notification was gated on the abort count).
+            var profile = new Mock<IProfileStore>();
+            profile.Setup(p => p.GetSafetyPolicies()).Returns(SafetyWith("pause"));
+            profile.Setup(p => p.GetNotificationsSettings()).Returns(NotificationsWith(onDiskSpaceLow: false));
+
+            var sequencer = new Mock<ISequencerService>();
+            sequencer.Setup(s => s.PauseActiveRunsAsync(It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new List<Guid> { Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid() });
+
+            DiagnosticEventDto? captured = null;
+            var diagnostics = new Mock<IDiagnosticsService>();
+            diagnostics.Setup(d => d.ClearOpenEventsByTypeAsync(It.IsAny<string>(), It.IsAny<DateTimeOffset>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(0);
+            diagnostics.Setup(d => d.CreateEventAsync(It.IsAny<DiagnosticEventDto>(), It.IsAny<string?>(), It.IsAny<bool?>(), It.IsAny<CancellationToken>()))
+                .Callback<DiagnosticEventDto, string?, bool?, CancellationToken>((e, _, _, _) => captured = e)
+                .Returns(Task.CompletedTask);
+            var posted = new List<NotificationDto>();
+            var notifications = new Mock<INotificationService>();
+            notifications.Setup(n => n.CreateAsync(It.IsAny<NotificationDto>(), It.IsAny<CancellationToken>()))
+                .Callback<NotificationDto, CancellationToken>((d, _) => posted.Add(d))
+                .Returns(Task.CompletedTask);
+
+            using var monitor = new DiskSpaceMonitor(profile.Object, diagnostics.Object, notifications.Object,
+                sequencer.Object, NullLogger<DiskSpaceMonitor>.Instance);
+
+            await monitor.EmitTransitionAsync(DiskSpaceLevel.Low, DiskSpaceLevel.Critical, 1 * Gib, "/mnt/data", CancellationToken.None);
+
+            sequencer.Verify(s => s.PauseActiveRunsAsync(It.IsAny<CancellationToken>()), Times.Once);
+            sequencer.Verify(s => s.AbortActiveRunsAsync(It.IsAny<CancellationToken>()), Times.Never, "pause never aborts");
+            Assert.That(captured, Is.Not.Null);
+            Assert.That(captured!.AutoActionTaken, Is.True);
+            Assert.That(captured.AutoActionDescription, Does.Contain("pause paused 3"));
+            // The low-disk toggle is OFF, so the only inbox entry is the pause itself — surfaced unconditionally.
+            var paused = posted.Single();
+            Assert.That(paused.Title, Is.EqualTo("Sequence paused — disk critically low"));
+            Assert.That(paused.Severity, Is.EqualTo(NotificationSeverity.Critical));
+            Assert.That(paused.Message, Does.StartWith("Paused 3 running sequence(s)").And.Contain("set to pause"));
+        }
+
+        [Test]
         public async Task EmitTransition_into_Critical_with_warn_policy_does_not_abort() {
             var profile = new Mock<IProfileStore>();
             profile.Setup(p => p.GetSafetyPolicies()).Returns(SafetyWith("warn"));
@@ -213,11 +260,12 @@ namespace OpenAstroAra.Test {
         // ─── §29 — the per-frame pre-capture block decision ───
 
         [Test]
-        public void PreCapture_blocks_only_on_critical_AND_abort_policy() {
+        public void PreCapture_blocks_only_on_critical_AND_abort_or_pause_policy() {
             // Critically low + abort → block before the shutter opens.
             Assert.That(DiskSpaceMonitor.PreCaptureShouldBlock(1 * Gib, 10, 2, "abort"), Is.True);
             // The 'warn' default NEVER blocks — the monitor's notification path owns reporting.
             Assert.That(DiskSpaceMonitor.PreCaptureShouldBlock(1 * Gib, 10, 2, "warn"), Is.False);
+            Assert.That(DiskSpaceMonitor.PreCaptureShouldBlock(1 * Gib, 10, 2, "pause"), Is.True, "#1185 — a paused run must not keep filling the disk");
             Assert.That(DiskSpaceMonitor.PreCaptureShouldBlock(1 * Gib, 10, 2, null), Is.False,
                 "an unset/unknown policy degrades to the safe warn-only behaviour");
             // Merely LOW (not critical) never blocks even under abort.
