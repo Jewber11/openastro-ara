@@ -80,6 +80,7 @@ public static partial class EquipmentEndpoints {
 
     public static IEndpointRouteBuilder MapEquipmentEndpoints(this IEndpointRouteBuilder app) {
         var equipment = app.MapGroup("/api/v1/equipment").WithTags("Equipment");
+        equipment.AddEndpointFilter(FilterFocusOffsetEndpoints.GuardMaintenance);
         // §58.12 — any explicit equipment COMMAND (connect, slew, park, cooler,
         // Stop Mount, ...) is the user back at the rig: cancel a pending
         // unattended-shutdown countdown. GETs are excluded on purpose — WILMA's
@@ -656,8 +657,12 @@ public static partial class EquipmentEndpoints {
         var totalProbes = AutofocusSweepService.ProbeCount(profiles.GetAutofocusSettings());
         // §59.12 — this run is the user's (the Smart Focus pane / focuser panel), not a sequence's.
         tracker.StampNextTrigger("manual");
-        var job = jobs.Enqueue("autofocus", totalSteps: totalProbes, AutofocusJobWork(autofocus, tracker, totalProbes));
-        return Results.Accepted($"/api/v1/jobs/{job.JobId}", job);
+        try {
+            var job = jobs.Enqueue("autofocus", totalSteps: totalProbes, AutofocusJobWork(autofocus, tracker, totalProbes), identity: "single-autofocus");
+            return Results.Accepted($"/api/v1/jobs/{job.JobId}", job);
+        } catch (BatchJobConflictException ex) {
+            return Results.Problem(statusCode: 409, detail: ex.Message);
+        }
     }
 
     /// <summary>§59 — the work body of the <c>POST /equipment/focuser/autofocus</c> job, extracted so the

@@ -326,7 +326,7 @@ const List<TriggerDef> triggerCatalog = [
     runnerItems: [runAutofocusType],
   ),
   // §59.5/§59.6 — autofocus on the first LIGHT of a newly-selected filter: with
-  // the use-current-filter policy this is how per-filter offsets are learned.
+  // the use-current-filter policy this verifies focus through the selected filter.
   // No serialized fields of its own.
   TriggerDef(
     type:

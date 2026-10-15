@@ -4971,7 +4971,7 @@ Server enumerates Alpaca devices, groups by type. User assigns each device-type 
 - Exposure time (default 5s)
 - Step size (microns)
 - Max retries (default 3)
-- "Auto-discover filter offsets" toggle (default on — first AF run per filter populates filter wheel offset)
+- **Filter focus offsets → Calculate offsets** (Settings → Imaging → Autofocus): automated reference/filter/reference sweeps, signed offsets corrected for linear drift, progress/cancel/clear; see §59.6.
 
 **Screen 13 — File saving + naming**
 
@@ -8772,7 +8772,7 @@ Six trigger conditions, OR'd together, individually configurable:
 | **Sensor temp Δ** | 1.5 °C since last AF | Temperature is the dominant drift driver |
 | **HFR drift** | 15% above session median over 3 frames | Catches drift the time-interval missed |
 | **Post-meridian-flip** | per §58.4 `refocus_after_flip` policy | OTA flexure + temp drift during flip |
-| **First use of a filter** | ON | Discovers per-filter focus offsets |
+| **First use of a filter** | ON | Verifies focus through the newly selected filter |
 
 Each trigger consults `GET /api/v1/diagnostics/current` before firing (§59.9). Non-nominal diagnostic states defer the AF.
 
@@ -8780,7 +8780,7 @@ Each trigger consults `GET /api/v1/diagnostics/current` before firing (§59.9). 
 
 AF always runs on whichever filter is currently in the wheel. No swap-to-luminance behavior.
 
-**Why this matters:** users with non-parfocal filters would have their focuser positioned wrong if AF swapped to L and then back to (e.g.) Hα. Per-filter offsets are learned naturally as the sequencer uses each filter for the first time and triggers AF (per the "first use of a filter" trigger).
+**Why this matters:** users with non-parfocal filters would have their focuser positioned wrong if AF swapped to L and then back to (e.g.) Hα. Per-filter offsets are calculated by the explicit **Calculate offsets** calibration in Settings → Imaging → Autofocus. Each target is bracketed by Classic autofocus on a chosen reference; linear focus drift is interpolated out. Only a complete run commits the daemon-owned `filter_focus_offsets` profile section. The offsets apply as `target − source` after confirmed manual/sequence changes; stale equipment/slot/optics identities refuse compensation. A failed move retains its absolute destination for retry; calibration failure/cancel restores original wheel/focus and keeps old offsets. Successful calibration leaves the reference selected and focused. First-use autofocus remains a verification trigger; a single autofocus position on a new filter is not silently treated as an offset measurement.
 
 If a filter has too few stars (< 30 detected at the calibration exposure time), server doubles exposure and retries once. Still fewer than 30 stars → AF skipped with a notification: *"Insufficient stars on this filter for autofocus. Continuing with previous focus position. Consider manual focus check from the equipment panel."*
 

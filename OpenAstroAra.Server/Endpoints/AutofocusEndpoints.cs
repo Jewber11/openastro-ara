@@ -30,6 +30,7 @@ public static class AutofocusEndpoints {
 
     public static IEndpointRouteBuilder MapAutofocusEndpoints(this IEndpointRouteBuilder app) {
         var autofocus = app.MapGroup("/api/v1/autofocus").WithTags("Autofocus");
+        autofocus.AddEndpointFilter(FilterFocusOffsetEndpoints.GuardMaintenance);
 
         // §59.15 — the stored Smart Focus calibration (the RAW sweep samples + when/temp/filter, for
         // display/debug; the client rebuilds any table it wants to render). 404 = "not calibrated",

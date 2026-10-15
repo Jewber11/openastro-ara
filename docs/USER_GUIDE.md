@@ -61,6 +61,27 @@ devices are discovered on the LAN, and the daemon remembers your choices for aut
 If a device drops mid-session, the daemon attempts hot-reconnects and raises a diagnostic; the
 health pill (see §9) turns amber/red until it clears.
 
+### Automatic filter focus offsets
+
+Open **Settings → Imaging → Autofocus → Filter focus offsets**. Connect a motorized wheel
+(at least two filters), camera and absolute focuser. Point at a star field; stop sequences and
+Live View, disable focuser temperature compensation, and save autofocus settings with an exposure
+long enough for your narrowest filter. Choose a **Reference filter**, then **Calculate offsets**.
+
+Ara runs Classic autofocus on the reference, each other filter, and the reference again after each
+filter. It subtracts interpolated reference drift from each focus difference. Progress counts autofocus
+runs (`2 × filter count − 1`); **Cancel calibration** restores the original filter and focuser position.
+A failed/cancelled calibration preserves the previous offsets; successful calibration finishes focused
+on the reference and saves signed offsets in the active profile.
+
+Offsets apply automatically after confirmed filter changes from both equipment controls and sequences.
+Positive offsets increase focuser position; switching uses `new offset − old offset`, so return trips
+and repeated selections do not accumulate shifts. An interrupted focus move must be retried on the
+same filter, or cleared/recalibrated. The Filter Wheel panel reports background-change failures.
+Equipment, slot-name or optics changes require **Clear offsets** or recalibration. Recalibrate after
+physically replacing filters even when slot names stay the same. Shared profiles omit these measurements.
+Autofocus triggers remain active and always focus through the selected filter.
+
 ### Smart Focus (Setup → Smart Focus)
 
 The Setup tab's checklist has a **Smart Focus** step between Connect equipment and Polar align.

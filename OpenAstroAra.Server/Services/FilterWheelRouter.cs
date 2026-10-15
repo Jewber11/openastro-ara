@@ -42,15 +42,21 @@ public sealed class FilterWheelRouter : IFilterWheelService, IFilterWheelMediato
 
     private readonly FilterWheelService _alpaca;
     private readonly ManualFilterWheelService _manual;
+    private readonly FilterFocusOffsetService? _offsets;
+    private readonly IBatchJobService? _jobs;
+    private BatchJobDto? _changeJob;
     private readonly SemaphoreSlim _switch = new(1, 1);
     // In memory only: false (Alpaca) on every boot. The boot reconnect restores the manual wheel by
     // connecting the remembered selection through ConnectAsync, which sets it; with nothing
     // remembered, RetainedDevice is the Alpaca wheel's.
     private volatile bool _manualSelected;
 
-    public FilterWheelRouter(FilterWheelService alpaca, ManualFilterWheelService manual) {
+    public FilterWheelRouter(FilterWheelService alpaca, ManualFilterWheelService manual,
+        FilterFocusOffsetService? offsets = null, IBatchJobService? jobs = null) {
         _alpaca = alpaca ?? throw new ArgumentNullException(nameof(alpaca));
         _manual = manual ?? throw new ArgumentNullException(nameof(manual));
+        _offsets = offsets;
+        _jobs = jobs;
     }
 
     /// <summary>The manual wheel, for its own endpoints (installed / cancel).</summary>
@@ -65,9 +71,22 @@ public sealed class FilterWheelRouter : IFilterWheelService, IFilterWheelMediato
     public DiscoveredDeviceDto? RetainedDevice =>
         _manualSelected ? _manual.RetainedDevice : _alpaca.RetainedDevice;
 
-    public Task<FilterWheelDto?> GetAsync(CancellationToken ct) => Rest.GetAsync(ct);
+    public async Task<FilterWheelDto?> GetAsync(CancellationToken ct) {
+        var status = await Rest.GetAsync(ct).ConfigureAwait(false);
+        if (status is not null && _offsets is not null) status = _offsets.WithMeasuredOffsets(status);
+        if (status is null || _changeJob is null || _jobs?.GetJob(_changeJob.JobId) is not { } job) return status;
+        if (job.State is "queued" or "running" && status.Runtime.State != "awaiting_user")
+            return status with { Runtime = status.Runtime with { State = "moving" } };
+        if (job.State == "failed")
+            return status with { Runtime = status.Runtime with { ErrorMessage = job.ErrorMessage } };
+        return status;
+    }
 
-    public async Task<OperationAcceptedDto> ConnectAsync(ConnectRequestDto request, string? idempotencyKey, CancellationToken ct) {
+    public Task<OperationAcceptedDto> ConnectAsync(ConnectRequestDto request, string? idempotencyKey, CancellationToken ct) =>
+        _offsets is null ? ConnectCoreAsync(request, idempotencyKey, ct)
+            : _offsets.ExclusiveAsync(() => ConnectCoreAsync(request, idempotencyKey, ct), ct);
+
+    private async Task<OperationAcceptedDto> ConnectCoreAsync(ConnectRequestDto request, string? idempotencyKey, CancellationToken ct) {
         ArgumentNullException.ThrowIfNull(request);
         var wantManual = ManualFilterWheelService.IsManual(request.Device);
         await _switch.WaitAsync(ct).ConfigureAwait(false);
@@ -94,15 +113,44 @@ public sealed class FilterWheelRouter : IFilterWheelService, IFilterWheelMediato
 
     public Task<bool> ForgetAsync(CancellationToken ct) => Rest.ForgetAsync(ct);
 
-    public Task<OperationAcceptedDto> ChangeFilterAsync(FilterChangeRequestDto request, string? idempotencyKey, CancellationToken ct) =>
-        Rest.ChangeFilterAsync(request, idempotencyKey, ct);
+    public async Task<OperationAcceptedDto> ChangeFilterAsync(FilterChangeRequestDto request, string? idempotencyKey, CancellationToken ct) {
+        ArgumentNullException.ThrowIfNull(request);
+        if (_offsets is null || _jobs is null) return await Rest.ChangeFilterAsync(request, idempotencyKey, ct).ConfigureAwait(false);
+        if (_offsets.IsCalibrating) throw new InvalidOperationException("Filter-offset calibration owns the wheel.");
+        var status = await Rest.GetAsync(ct).ConfigureAwait(false);
+        if (status is not { State: EquipmentConnectionState.Connected }) throw new InvalidOperationException("Filter wheel is not connected.");
+        var slot = System.Linq.Enumerable.SingleOrDefault(status.Slots, s => s.Position == request.Position)
+            ?? throw new ArgumentOutOfRangeException(nameof(request), "Unknown filter slot.");
+        var job = _jobs.Enqueue("filter-wheel.change", 1, async (tick, token) => {
+            await ChangeBoundAsync(new FilterInfo(slot.Name, 0, checked((short)slot.Position)), null, status.DeviceId, token).ConfigureAwait(false);
+            tick(1);
+        }, identity: request.Position.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        _changeJob = job;
+        return new OperationAcceptedDto(job.JobId, "filter-wheel.change", DateTimeOffset.UtcNow, idempotencyKey);
+    }
 
     // ─── IFilterWheelMediator ───
 
     public FilterWheelInfo GetInfo() => Mediator.GetInfo();
 
     public Task<FilterInfo> ChangeFilter(FilterInfo inputFilter, IProgress<ApplicationStatus>? progress = null, CancellationToken token = default) =>
-        Mediator.ChangeFilter(inputFilter, progress, token);
+        ChangeBoundAsync(inputFilter, progress, null, token);
+
+    private async Task<FilterInfo> ChangeBoundAsync(FilterInfo inputFilter, IProgress<ApplicationStatus>? progress, string? expectedWheelId, CancellationToken token) {
+        if (_offsets is null) return await Mediator.ChangeFilter(inputFilter, progress, token).ConfigureAwait(false);
+        var status = await Rest.GetAsync(token).ConfigureAwait(false);
+        if (expectedWheelId is not null && status?.DeviceId != expectedWheelId)
+            throw new InvalidOperationException("Filter wheel changed before the queued change started.");
+        var slot = status is null ? null : System.Linq.Enumerable.SingleOrDefault(status.Slots, s => s.Position == inputFilter.Position);
+        var target = slot is null ? inputFilter : new FilterInfo(slot.Name, 0, inputFilter.Position);
+        var result = await _offsets.ChangeAsync(Mediator, target, token, status?.Slots, expectedWheelId ?? status?.DeviceId).ConfigureAwait(false);
+        _changeJob = null;
+        return result;
+    }
+
+    // Used only inside the offset service's exclusive calibration transaction.
+    internal Task<FilterInfo> ChangeUncompensatedAsync(FilterInfo filter, CancellationToken ct) =>
+        Mediator.ChangeFilter(filter, token: ct);
 
     public Task<bool> Connect() => Mediator.Connect();
     public Task Disconnect() => Mediator.Disconnect();

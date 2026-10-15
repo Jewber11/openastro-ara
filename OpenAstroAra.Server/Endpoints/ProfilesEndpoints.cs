@@ -34,6 +34,7 @@ namespace OpenAstroAra.Server.Endpoints;
 public static partial class ProfilesEndpoints {
     public static IEndpointRouteBuilder MapProfilesEndpoints(this IEndpointRouteBuilder app) {
         var profiles = app.MapGroup("/api/v1/profiles").WithTags("Profiles");
+        profiles.AddEndpointFilter(FilterFocusOffsetEndpoints.GuardMaintenance);
 
         profiles.MapGet("/", (IProfileRepository repo) => Results.Ok(repo.List()))
             .Produces<ProfileListDto>(StatusCodes.Status200OK)

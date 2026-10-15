@@ -29,8 +29,44 @@ public sealed class ActiveRunSessionRegistry {
     private readonly object _gate = new();
     private readonly List<Guid> _active = [];
 
+    private bool _maintenance;
+    private int _executions;
+
+    // Reserve before the sequence body is loaded, even if creating its catalog session fails.
+    public IDisposable BeginSequence() {
+        lock (_gate) {
+            if (_maintenance) throw new InvalidOperationException("Equipment calibration is running.");
+            _executions++;
+            return new SequenceLease(this);
+        }
+    }
+
+    private sealed class SequenceLease(ActiveRunSessionRegistry owner) : IDisposable {
+        private ActiveRunSessionRegistry? _owner = owner;
+        public void Dispose() {
+            var current = System.Threading.Interlocked.Exchange(ref _owner, null);
+            if (current is not null) { lock (current._gate) { current._executions--; } }
+        }
+    }
+
+    public bool MaintenanceActive { get { lock (_gate) { return _maintenance; } } }
+
+    public IDisposable BeginMaintenance() {
+        lock (_gate) {
+            if (_maintenance || _active.Count > 0 || _executions > 0)
+                throw new InvalidOperationException("Stop sequences before calibrating filter offsets.");
+            _maintenance = true;
+            return new MaintenanceLease(this);
+        }
+    }
+
+    private sealed class MaintenanceLease(ActiveRunSessionRegistry owner) : IDisposable {
+        public void Dispose() { lock (owner._gate) { owner._maintenance = false; } }
+    }
+
     public void Enter(Guid sessionId) {
         lock (_gate) {
+            if (_maintenance) throw new InvalidOperationException("Equipment calibration is running.");
             _active.Remove(sessionId);
             _active.Add(sessionId);
         }
@@ -52,7 +88,7 @@ public sealed class ActiveRunSessionRegistry {
     public bool HasAny {
         get {
             lock (_gate) {
-                return _active.Count > 0;
+                return _active.Count > 0 || _executions > 0;
             }
         }
     }

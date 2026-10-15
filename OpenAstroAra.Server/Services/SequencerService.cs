@@ -139,34 +139,44 @@ public sealed partial class SequencerService : ISequencerService, IHostedService
         // takes this fresh run; a live (non-terminal) run keeps the slot; a
         // finished run is replaced (restart allowed). We own the run iff the
         // returned reference is ours.
-        var run = TryReserveRun(id);
-        if (run is null) {
-            // A live run already owns the slot — idempotent.
-            return Task.FromResult(PlaceholderEquipmentHelpers.Accepted("sequencer.start", idempotencyKey));
-        }
-        PruneTerminalRuns();
-
-        // Assign the worker synchronously — before any await — so
-        // IHostedService.StopAsync always finds a Worker to await (closes the
-        // null-Worker shutdown window). The body load + deserialize + §28
-        // checkpoint claim run inside the worker, off the request path.
-        // §48.1 — resolve the profile's capture default SYNCHRONOUSLY before the
-        // worker exists: a fast run must never reach its completion check before
-        // the choice lands (#735 review — the two-Task.Run race). Only the WS
-        // announcement rides a background task.
-        string? autoFlatsToken = null;
-        if (announceAutoFlats) {
-            autoFlatsToken = ResolveAutoFlatsToken();
-            if (autoFlatsToken is ChoicePanelAtEnd or ChoiceSkyAtTwilight) {
-                run.AutoFlatsChoice = autoFlatsToken;
+        IDisposable? equipmentLease = null;
+        try {
+            equipmentLease = _runSessions?.BeginSequence();
+            var run = TryReserveRun(id);
+            if (run is null) {
+                // A live run already owns the slot — idempotent.
+                return Task.FromResult(PlaceholderEquipmentHelpers.Accepted("sequencer.start", idempotencyKey));
             }
+            PruneTerminalRuns();
+
+            // Assign the worker synchronously — before any await — so
+            // IHostedService.StopAsync always finds a Worker to await (closes the
+            // null-Worker shutdown window). The body load + deserialize + §28
+            // checkpoint claim run inside the worker, off the request path.
+            // §48.1 — resolve the profile's capture default SYNCHRONOUSLY before the
+            // worker exists: a fast run must never reach its completion check before
+            // the choice lands (#735 review — the two-Task.Run race). Only the WS
+            // announcement rides a background task.
+            string? autoFlatsToken = null;
+            if (announceAutoFlats) {
+                autoFlatsToken = ResolveAutoFlatsToken();
+                if (autoFlatsToken is ChoicePanelAtEnd or ChoiceSkyAtTwilight) {
+                    run.AutoFlatsChoice = autoFlatsToken;
+                }
+            }
+            var workerLease = equipmentLease;
+            run.Worker = Task.Run(async () => {
+                using (workerLease) { await LoadAndRunAsync(id, run).ConfigureAwait(false); }
+            }, CancellationToken.None);
+            equipmentLease = null; // worker owns disposal from this point
+            if (autoFlatsToken is not null) {
+                var runId = run.RunId;
+                _ = Task.Run(() => EmitAutoFlatsAnnouncementAsync(id, runId, autoFlatsToken), CancellationToken.None);
+            }
+            return Task.FromResult(PlaceholderEquipmentHelpers.Accepted("sequencer.start", idempotencyKey));
+        } finally {
+            equipmentLease?.Dispose();
         }
-        run.Worker = Task.Run(() => LoadAndRunAsync(id, run), CancellationToken.None);
-        if (autoFlatsToken is not null) {
-            var runId = run.RunId;
-            _ = Task.Run(() => EmitAutoFlatsAnnouncementAsync(id, runId, autoFlatsToken), CancellationToken.None);
-        }
-        return Task.FromResult(PlaceholderEquipmentHelpers.Accepted("sequencer.start", idempotencyKey));
     }
 
     // Worker entry: load + deserialize the body, then drive it. Split from

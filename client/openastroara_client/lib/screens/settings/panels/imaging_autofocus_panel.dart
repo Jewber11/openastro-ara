@@ -1,5 +1,8 @@
 import 'package:flutter/material.dart';
+
 import '../../../util/friendly_error.dart';
+import '../../../widgets/focus/filter_focus_offsets_card.dart';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../services/profile_api.dart';
@@ -157,9 +160,7 @@ class _ImagingAutofocusPanelState extends ConsumerState<ImagingAutofocusPanel>
         ExpansionTile(
           title: Text(
             'Advanced',
-            style: Theme.of(context)
-                .textTheme
-                .bodyMedium
+            style: Theme.of(context).textTheme.bodyMedium
                 ?.copyWith(color: AraColors.textSecondary),
           ),
           tilePadding: EdgeInsets.zero,
@@ -191,6 +192,7 @@ class _ImagingAutofocusPanelState extends ConsumerState<ImagingAutofocusPanel>
             ),
           ],
         ),
+        const FilterFocusOffsetsCard(),
         const SettingsSectionHeader('Triggers'),
         SettingsSwitchRow(
           label: 'After filter change',

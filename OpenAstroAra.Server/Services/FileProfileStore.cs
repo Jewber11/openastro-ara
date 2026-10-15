@@ -195,6 +195,9 @@ public sealed partial class FileProfileStore : IProfileStore {
     public CustomHorizonDto GetCustomHorizon() { lock (_lock) { return _snapshot.CustomHorizon!; } }
     public void PutCustomHorizon(CustomHorizonDto value) => UpdateAndPersist(s => s with { CustomHorizon = value });
 
+    public FilterFocusOffsetsDto? GetFilterFocusOffsets() { lock (_lock) { return _snapshot.FilterFocusOffsets; } }
+    public void PutFilterFocusOffsets(FilterFocusOffsetsDto? value) => UpdateAndPersist(s => s with { FilterFocusOffsets = value });
+
     public FocusCalibrationDto? GetFocusCalibration() { lock (_lock) { return _snapshot.FocusCalibration; } }
     public void PutFocusCalibration(FocusCalibrationDto? value) => UpdateAndPersist(s => s with { FocusCalibration = value });
 

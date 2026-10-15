@@ -36,6 +36,7 @@ namespace OpenAstroAra.Server.Endpoints;
 public static class ProfileEndpoints {
     public static IEndpointRouteBuilder MapProfileEndpoints(this IEndpointRouteBuilder app) {
         var profile = app.MapGroup("/api/v1/profile").WithTags("Profile");
+        profile.AddEndpointFilter(FilterFocusOffsetEndpoints.GuardMaintenance);
 
         profile.MapGet("/imaging-defaults", (IProfileStore store) =>
                 Results.Ok(store.GetImagingDefaults()))
