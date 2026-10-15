@@ -309,6 +309,7 @@ public partial class Program {
         builder.Services.AddSingleton<FilterWheelService>();
         // #1298 — the router fronts the Alpaca wheel and the driverless manual wheel (registered
         // below, once the profile dir is known); it is THE IFilterWheelService and mediator.
+        builder.Services.AddSingleton<FilterFocusOffsetService>();
         builder.Services.AddSingleton<FilterWheelRouter>();
         builder.Services.AddSingleton<IFilterWheelService>(sp => sp.GetRequiredService<FilterWheelRouter>());
         // §14e — fifth real device service: live rotator (mechanical/sky angle) + Move. REST-only;
@@ -730,7 +731,8 @@ public partial class Program {
                 notifications: sp.GetRequiredService<INotificationService>(),
                 travelRange: ct => AutofocusSweepService.FocuserTravelAsync(sp.GetRequiredService<IFocuserService>(), ct),
                 tracker: sp.GetRequiredService<AutofocusRunTracker>(),
-                focuserStepUm: ct => AutofocusSweepService.FocuserStepUmAsync(sp.GetRequiredService<IFocuserService>(), ct)));
+                focuserStepUm: ct => AutofocusSweepService.FocuserStepUmAsync(sp.GetRequiredService<IFocuserService>(), ct),
+                filterOffsets: sp.GetRequiredService<FilterFocusOffsetService>()));
         // #1264 — the unguided tracking probe (ladder of analysis frames → eccentricity/FWHM → ceiling →
         // tracking_calibration) and the latest-frame-quality feed the exposure guard reads.
         builder.Services.AddSingleton<FrameQualityFeed>(sp =>
@@ -1170,6 +1172,7 @@ public partial class Program {
 
         // §59.15 — Smart Focus calibration read + recalibrate (profile-state, not device ops).
         app.MapAutofocusEndpoints();
+        app.MapFilterFocusOffsetEndpoints();
         app.MapTrackingEndpoints();
         app.MapRotationAssistEndpoints();
         app.MapBahtinovFocusEndpoints();

@@ -89,14 +89,17 @@ class EquipmentFilterWheelPanel extends ConsumerWidget {
         // while a wheel is connected (its driver names take over) to avoid duplication.
         if (showSlotLabels) ...[
           SettingsSectionHeader(
-              manual ? 'Filters (manual filter wheel)' : 'Slot labels (for sequences)'),
+            manual
+                ? 'Filters (manual filter wheel)'
+                : 'Slot labels (for sequences)',
+          ),
           for (var slot = 1; slot <= labels.slotCount; slot++)
             EditableTextRow(
               label: 'Slot $slot',
               helpKey: slot == 1
                   ? (manual
-                      ? 'eq.filterwheel.manual_filters'
-                      : 'eq.filterwheel.slot_labels')
+                        ? 'eq.filterwheel.manual_filters'
+                        : 'eq.filterwheel.slot_labels')
                   : null,
               currentValue: labels.labelAt(slot),
               getCanonical: () =>
@@ -164,8 +167,13 @@ class _FilterWheelBodyState extends ConsumerState<_FilterWheelBody> {
         _reconcileTimer?.cancel();
         return;
       }
-      if (_reconcileTicks >= 40 || !ref.read(filterWheelProvider).maybeWhen(
-          data: (w) => w != null && w.isConnected, orElse: () => false)) {
+      if (_reconcileTicks >= 40 ||
+          !ref
+              .read(filterWheelProvider)
+              .maybeWhen(
+                data: (w) => w != null && w.isConnected,
+                orElse: () => false,
+              )) {
         _reconcileTimer?.cancel();
         return;
       }
@@ -256,9 +264,9 @@ class _FilterWheelBodyState extends ConsumerState<_FilterWheelBody> {
     final currentText = pending != null
         ? 'Changing…'
         : (current != null
-            ? '${current.name.isEmpty ? 'Slot ${current.position}' : current.name} '
-                  '(slot ${current.position})'
-            : (status.isMoving ? 'Changing…' : '—'));
+              ? '${current.name.isEmpty ? 'Slot ${current.position}' : current.name} '
+                    '(slot ${current.position})'
+              : (status.isMoving ? 'Changing…' : '—'));
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -277,6 +285,11 @@ class _FilterWheelBodyState extends ConsumerState<_FilterWheelBody> {
             Text(currentText),
           ],
         ),
+        if (status.errorMessage != null)
+          Text(
+            status.errorMessage!,
+            style: const TextStyle(color: AraColors.accentError),
+          ),
         const Divider(height: 20, color: AraColors.border),
         if (status.slots.isEmpty)
           const Text('This filter wheel reports no slots.')
@@ -352,9 +365,8 @@ class _SlotRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final secondary = Theme.of(
-      context,
-    ).textTheme.bodySmall?.copyWith(color: AraColors.textSecondary);
+    final secondary = Theme.of(context).textTheme.bodySmall
+        ?.copyWith(color: AraColors.textSecondary);
     // Same empty-name fallback the "Current filter" header uses, so an unnamed
     // slot reads consistently in both places.
     final name = slot.name.isEmpty ? 'Slot ${slot.position}' : slot.name;
@@ -392,8 +404,10 @@ class _SlotRow extends StatelessWidget {
               if (showOffset)
                 Padding(
                   padding: const EdgeInsets.only(right: 12),
-                  child: Text('focus offset ${slot.focusOffset}',
-                      style: secondary),
+                  child: Text(
+                    'focus offset ${slot.focusOffset}',
+                    style: secondary,
+                  ),
                 ),
               // Trailing affordance: spinner on the pending row, green check
               // on the active row, chevron on selectable rows.
@@ -404,8 +418,11 @@ class _SlotRow extends StatelessWidget {
                   child: CircularProgressIndicator(strokeWidth: 2),
                 )
               else if (isCurrent)
-                const Icon(Icons.check_circle,
-                    size: 20, color: AraColors.accentConnected)
+                const Icon(
+                  Icons.check_circle,
+                  size: 20,
+                  color: AraColors.accentConnected,
+                )
               else
                 Icon(
                   Icons.chevron_right,
@@ -435,9 +452,11 @@ Future<void> _persistLabels(BuildContext context, WidgetRef ref) async {
     }
   } catch (e) {
     if (context.mounted) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(friendlyError(e, action: 'save the slot labels'))));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(friendlyError(e, action: 'save the slot labels')),
+        ),
+      );
     }
   }
 }

@@ -442,6 +442,15 @@ public sealed class InMemoryProfileStore : IProfileStore {
     }
 
     // §59.2 Smart Focus calibration — null until a Classic AF sweep records one.
+    private FilterFocusOffsetsDto? _filterFocusOffsets;
+    public FilterFocusOffsetsDto? GetFilterFocusOffsets() {
+        lock (_lock) { return _filterFocusOffsets; }
+    }
+    public void PutFilterFocusOffsets(FilterFocusOffsetsDto? value) {
+        lock (_lock) { _filterFocusOffsets = value; }
+        RaiseChanged();
+    }
+
     private FocusCalibrationDto? _focusCalibration;
 
     public FocusCalibrationDto? GetFocusCalibration() {

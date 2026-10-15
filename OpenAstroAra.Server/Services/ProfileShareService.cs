@@ -195,6 +195,7 @@ public sealed class ProfileShareService : IProfileShareService {
         // focuser + optical train; on the recipient's rig it would feed the one-frame runner a
         // wrong map (the fallback ladder would catch it, but a share must not plant bad state).
         FocusCalibration = null,
+        FilterFocusOffsets = null,
         // Strip the #1264 tracking calibration — it was measured on the donor's mount.
         TrackingCalibration = null,
         // Strip the #1140 sky-model calibration — fitted to the donor's optics, camera and sky.
@@ -250,6 +251,7 @@ public sealed class ProfileShareService : IProfileShareService {
         "Camera electronics (gain / offset / readout) — re-captured on your first connect",
         "Filter list — declare your own filters",
         "Autofocus (Smart Focus) calibration — regenerates on your first autofocus sweep",
+        "Filter focus offsets — measure against your own filters and focuser",
         "Tracking calibration — measured on the donor's mount",
         "Sky-model calibration — fitted to the donor's optics, camera and sky",
         "Guider calibration state (dark library / defect map stamps) — rebuild on your rig",

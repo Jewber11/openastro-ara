@@ -90,7 +90,7 @@ public sealed partial class AutofocusSweepService {
         Justification = "Smart-run boundary, same rationale as RunSweepCoreAsync: probe captures / focuser moves / the metric can throw device, HTTP, or math exceptions; any escape must degrade to a restored position + the Classic fallback so the Smart path is never worse than the old behavior. CA1031's log-and-recover boundary applies.")]
     private async Task<bool?> TrySmartFocusAsync(IProgress<ApplicationStatus> progress, DateTimeOffset started, CancellationToken token) {
         var calibration = _profiles.GetFocusCalibration();
-        if (calibration is null) {
+        if (calibration is null || (_filterWheel is not null && calibration.Filter != CurrentFilterName())) {
             return null; // never calibrated — Classic IS the calibrator (§59.1)
         }
         var info = _focuser.GetInfo();

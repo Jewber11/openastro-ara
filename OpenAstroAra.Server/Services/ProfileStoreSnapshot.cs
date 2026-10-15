@@ -43,6 +43,7 @@ public static class ProfileStoreSnapshot {
         FilterWheelLabels: s.GetFilterWheelLabels(),
         CustomHorizon: s.GetCustomHorizon(),
         FocusCalibration: s.GetFocusCalibration(),
+        FilterFocusOffsets: s.GetFilterFocusOffsets(),
         CalibrationState: s.GetCalibrationState(),
         PolarAlign: s.GetPolarAlignSettings(),
         FilterWheelPolicy: s.GetFilterWheelPolicy(),
@@ -76,6 +77,7 @@ public static class ProfileStoreSnapshot {
         // §59.2 — null is meaningful here ("not calibrated"), so it round-trips as-is: switching to a
         // never-calibrated profile must CLEAR the live store's calibration, not keep the old rig's.
         s.PutFocusCalibration(snap.FocusCalibration);
+        s.PutFilterFocusOffsets(snap.FilterFocusOffsets);
         // #1264 — same reasoning: a profile whose rig was never probed must read "never measured".
         s.PutTrackingCalibration(snap.TrackingCalibration);
         // #1140 P2 — same reasoning: a profile whose library was never fitted reads "never fitted".

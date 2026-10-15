@@ -1416,6 +1416,16 @@ const List<Setting> settingsRegistry = [
     profilePath: 'autofocus.method',
   ),
   Setting(
+    id: 'img.autofocus.filter_offsets',
+    label: 'Filter focus offsets',
+    description: 'Calculate signed focus offsets automatically using reference-bracketed autofocus. Measure every filter, follow progress or cancel, and clear stale measurements. Saved offsets apply on equipment and sequence filter changes.',
+    keywords: ['filter offsets', 'filter focus offsets', 'automatic filter offsets', 'filter', 'offset', 'offsets', 'calibrate', 'calculate', 'reference', 'focus', 'parfocal'],
+    path: ['Settings', 'Imaging', 'Autofocus'],
+    type: SettingType.complex(),
+    defaultValue: null,
+    relatedSettings: ['img.autofocus.exposure_seconds', 'img.autofocus.step_size_auto'],
+  ),
+  Setting(
     id: 'img.autofocus.telescope_type',
     label: 'Telescope type',
     description: 'Your optical design. Smart Focus reads different defocus features per design — donut diameters on obstructed scopes, FWHM patterns on refractors — and can resolve which side of focus you are on. "Other / unknown" keeps the universal HFR-only behaviour.',

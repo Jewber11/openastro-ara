@@ -130,6 +130,9 @@ public interface IProfileStore {
     /// never by the client. Null means "not calibrated" (a fresh profile, or cleared by the recalibrate
     /// command); Put(null) clears. Single-writer (the sweep runs under its own gate), so plain Get/Put —
     /// no read-modify-write contract needed.</summary>
+    FilterFocusOffsetsDto? GetFilterFocusOffsets();
+    void PutFilterFocusOffsets(FilterFocusOffsetsDto? value);
+
     FocusCalibrationDto? GetFocusCalibration();
     void PutFocusCalibration(FocusCalibrationDto? value);
 

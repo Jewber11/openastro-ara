@@ -1127,6 +1127,13 @@ const Map<String, Help> helpRegistry = {
     relatedSettings: ['img.platesolve.engine', 'img.platesolve.solver_path'],
     keywords: ['rotation', 'rotate', 'position angle', 'framing', 'rotator', 'by hand', 'plate solve', 'single', 'loop'],
   ),
+  'img.autofocus.filter_offsets': Help(
+    key: 'img.autofocus.filter_offsets',
+    title: 'Automatic filter focus offsets',
+    body: 'Save autofocus settings, point at a star field, stop sequences and Live View, and turn focuser temperature compensation off. Connect a camera, motorized wheel and absolute focuser. Choose the reference filter, then Calculate offsets. Ara autofocuses the reference before and after each other filter to remove gradual drift. Only a complete run saves measurements; failure or cancellation restores original filter/focus and retains previous offsets. Offsets apply automatically after confirmed filter changes. Clear or recalibrate after equipment, optics or filter changes. Retry an interrupted filter change on the same slot before continuing.',
+    keywords: ['filters', 'offsets', 'reference', 'parfocal', 'calibration'],
+    relatedSettings: ['img.autofocus.filter_offsets', 'img.autofocus.exposure_seconds'],
+  ),
   'img.autofocus.method': Help(
     key: 'img.autofocus.method',
     title: 'Autofocus method',

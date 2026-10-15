@@ -87,4 +87,6 @@ public sealed record ProfileSnapshotDto(
     TrackingCalibrationDto? TrackingCalibration = null,
     // #1140 P2 sky-model calibration — daemon-owned derived data fitted from the library. Null is
     // meaningful ("never fitted") and passes through like the other calibrations.
-    SkyModelCalibrationDto? SkyModelCalibration = null);
+    SkyModelCalibrationDto? SkyModelCalibration = null,
+    // Measured against this profile's wheel/focuser/optics; never copied in a shared profile.
+    FilterFocusOffsetsDto? FilterFocusOffsets = null);

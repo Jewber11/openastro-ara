@@ -81,6 +81,7 @@ public sealed partial class AutofocusSweepService : IAutofocusExecutor, IDisposa
     private readonly ILogger<AutofocusSweepService> _logger;
     private readonly ImageHistoryService? _history;
     private readonly IFilterWheelMediator? _filterWheel;
+    private readonly FilterFocusOffsetService? _filterOffsets;
     // §59.10 — optional surfacing of the collimation verdict (both nullable, guarded per-use like the
     // Safety precedent): a WS event for every confident read, a user notification only for the actionable
     // Slight/Significant bands. Absent in tests that don't exercise surfacing.
@@ -111,7 +112,8 @@ public sealed partial class AutofocusSweepService : IAutofocusExecutor, IDisposa
             Func<AnalysisFrame, CancellationToken, double>? coarseMetric = null,
             Func<CancellationToken, Task<(int Min, int Max)?>>? travelRange = null,
             AutofocusRunTracker? tracker = null,
-            Func<CancellationToken, Task<double?>>? focuserStepUm = null) {
+            Func<CancellationToken, Task<double?>>? focuserStepUm = null,
+            FilterFocusOffsetService? filterOffsets = null) {
         _profiles = profiles ?? throw new ArgumentNullException(nameof(profiles));
         _focuser = focuser ?? throw new ArgumentNullException(nameof(focuser));
         _frames = frames ?? throw new ArgumentNullException(nameof(frames));
@@ -120,6 +122,7 @@ public sealed partial class AutofocusSweepService : IAutofocusExecutor, IDisposa
         _coarseMetric = coarseMetric ?? (metric is null ? DefaultCoarseMetric : null);
         _history = history;
         _filterWheel = filterWheel;
+        _filterOffsets = filterOffsets;
         _ws = ws;
         _notifications = notifications;
         _travelRange = travelRange;
@@ -151,6 +154,15 @@ public sealed partial class AutofocusSweepService : IAutofocusExecutor, IDisposa
 
     /// <inheritdoc/>
     public async Task<bool> RunAutofocusAsync(IProgress<ApplicationStatus> progress, CancellationToken token) {
+        if (_filterOffsets is not null) {
+            return await _filterOffsets.ExclusiveAsync(() => RunSerializedAsync(progress, token), token).ConfigureAwait(false);
+        }
+        return await RunSerializedAsync(progress, token).ConfigureAwait(false);
+    }
+
+    private async Task<bool> RunSerializedAsync(IProgress<ApplicationStatus> progress, CancellationToken token) {
+        if (_filterOffsets?.HasPendingCompensation == true)
+            throw new InvalidOperationException("Complete the pending filter change or clear offsets before autofocus.");
         await _sweepGate.WaitAsync(token).ConfigureAwait(false);
         // Released whatever the run does, setup included: a leaked gate would hang every later autofocus.
         try {
@@ -160,7 +172,7 @@ public sealed partial class AutofocusSweepService : IAutofocusExecutor, IDisposa
         }
     }
 
-    private async Task<bool> RunGatedAsync(IProgress<ApplicationStatus> progress, CancellationToken token) {
+    private async Task<bool> RunGatedAsync(IProgress<ApplicationStatus> progress, CancellationToken token, bool forceClassic = false) {
         // The run's own cancellation source, linked to the caller's token: the §59.12 Smart Focus pane cancels a
         // run through the tracker (POST /api/v1/autofocus/cancel) whoever started it — the focuser endpoint's
         // job or a sequence instruction — and that must cancel the sweep, not just the job polling it.
@@ -170,7 +182,7 @@ public sealed partial class AutofocusSweepService : IAutofocusExecutor, IDisposa
         var startInfo = _focuser.GetInfo();
         var startPosition = startInfo?.Position ?? 0;
         var started = DateTimeOffset.UtcNow;
-        var smartMode = _profiles.GetFocusCalibration() is not null;
+        var smartMode = !forceClassic && _profiles.GetFocusCalibration() is not null;
         _tracker?.Begin(
             smartMode ? "smart" : "classic",
             startPosition, smartMode ? SmartMaxShots : ProbeCount(settings), CurrentFilterName(), startInfo?.Temperature, runCts);
@@ -179,7 +191,7 @@ public sealed partial class AutofocusSweepService : IAutofocusExecutor, IDisposa
             // and as the §59.11 safety net. true = Smart succeeded; false = Smart ran and fell back
             // (restore policy applied, `fallback_classic` published — that event IS the mode hand-off,
             // so no second `started`); null = Smart never started (announce the run as classic).
-            var smart = await TrySmartFocusAsync(progress, started, runToken).ConfigureAwait(false);
+            var smart = forceClassic ? null : await TrySmartFocusAsync(progress, started, runToken).ConfigureAwait(false);
             if (smart == true) {
                 return true;
             }
