@@ -147,6 +147,125 @@ namespace OpenAstroAra.Test {
         }
 
         [Test]
+        public async Task The_calibration_view_reads_the_stored_calibration_and_judges_it() {
+            // #1364 item 2 — get_calibration_data over the wire: rates px/s, angles degrees.
+            var (fake, svc) = await ConnectedAsync(f => f.OnRpc("get_calibration_data", _ => new JsonObject {
+                ["calibrated"] = true, ["xAngle"] = 172.4, ["yAngle"] = 84.1, ["xRate"] = 12.1, ["yRate"] = 11.6,
+                ["xParity"] = "+", ["yParity"] = "-", ["declination"] = 44.2,
+            })).ConfigureAwait(false);
+            await using var _ = fake;
+            using var __ = svc;
+            var view = await new GuiderLiveService(svc, new NoFrames()).GetCalibrationAsync(CancellationToken.None).ConfigureAwait(false);
+            Assert.That(view.Connected, Is.True);
+            Assert.That(view.RunState, Is.EqualTo("none"), "no calibration ran this session");
+            Assert.That(view.Data, Is.Not.Null);
+            Assert.That(view.Data!.Calibrated, Is.True);
+            Assert.That((view.Data.XAngleDeg, view.Data.YAngleDeg, view.Data.DeclinationDeg), Is.EqualTo(((double?)172.4, (double?)84.1, (double?)44.2)));
+            Assert.That(view.Data.OrthogonalityErrorDeg, Is.EqualTo(1.7));
+            Assert.That(view.Verdict, Is.EqualTo("good"));
+        }
+
+        [Test]
+        public async Task Clear_calibration_sends_mount_and_a_refusal_is_422() {
+            var received = new ConcurrentQueue<JsonNode?>();
+            var refuse = false;
+            var (fake, svc) = await ConnectedAsync(f => f.OnRpc("clear_calibration", req => {
+                if (refuse) {
+                    throw new InvalidOperationException("mount not defined");
+                }
+                received.Enqueue(req["params"]?.DeepClone());
+                return JsonValue.Create(0);
+            })).ConfigureAwait(false);
+            await using var _ = fake;
+            using var __ = svc;
+            var live = new GuiderLiveService(svc, new NoFrames());
+            // A finished run on the plot, then Clear: the run starts over with the calibration.
+            var guider = svc.ConnectedGuiderOrNull()!;
+            await fake.BroadcastAsync(new JsonObject { ["Event"] = "StartCalibration", ["Timestamp"] = 0.0, ["Host"] = "fake", ["Inst"] = 1 }).ConfigureAwait(false);
+            await fake.BroadcastAsync(new JsonObject {
+                ["Event"] = "Calibrating", ["Timestamp"] = 0.0, ["Host"] = "fake", ["Inst"] = 1,
+                ["dir"] = "West", ["step"] = 1, ["dist"] = 1.2, ["dx"] = -1.2, ["dy"] = 0.1,
+            }).ConfigureAwait(false);
+            await fake.BroadcastAsync(new JsonObject { ["Event"] = "CalibrationComplete", ["Timestamp"] = 0.0, ["Host"] = "fake", ["Inst"] = 1 }).ConfigureAwait(false);
+            Assert.That(await WaitUntilAsync(() => guider.CalibrationRun.State == "complete").ConfigureAwait(false), Is.True, "precondition");
+            var ok = await OpenAstroAra.Server.Endpoints.EquipmentEndpoints.GuiderLiveActionAsync(
+                () => live.ClearCalibrationAsync(CancellationToken.None)).ConfigureAwait(false);
+            Assert.That((ok as Microsoft.AspNetCore.Http.IStatusCodeHttpResult)?.StatusCode, Is.EqualTo(204));
+            Assert.That(received.TryDequeue(out var sent), Is.True, "clear_calibration reached the guider");
+            Assert.That(sent!.ToJsonString(), Is.EqualTo("[\"Mount\"]"), "the mount's calibration, not the AO's");
+            Assert.That(guider.CalibrationRun.State, Is.EqualTo("none"), "a successful clear resets the run");
+            Assert.That(guider.CalibrationRun.Steps, Is.Empty);
+
+            refuse = true;
+            var refused = await OpenAstroAra.Server.Endpoints.EquipmentEndpoints.GuiderLiveActionAsync(
+                () => live.ClearCalibrationAsync(CancellationToken.None)).ConfigureAwait(false);
+            Assert.That((refused as Microsoft.AspNetCore.Http.IStatusCodeHttpResult)?.StatusCode, Is.EqualTo(422));
+        }
+
+        private static readonly int[] OnlyStepTwo = [2];
+
+        [Test]
+        public async Task Steps_without_dx_dy_are_left_off_the_plot() {
+            var (fake, svc) = await ConnectedAsync().ConfigureAwait(false);
+            await using var _ = fake;
+            using var __ = svc;
+            var guider = svc.ConnectedGuiderOrNull()!;
+            await fake.BroadcastAsync(new JsonObject { ["Event"] = "StartCalibration", ["Timestamp"] = 0.0, ["Host"] = "fake", ["Inst"] = 1 }).ConfigureAwait(false);
+            await fake.BroadcastAsync(new JsonObject {
+                ["Event"] = "Calibrating", ["Timestamp"] = 0.0, ["Host"] = "fake", ["Inst"] = 1, ["dir"] = "West", ["step"] = 1, ["dist"] = 1.0,
+            }).ConfigureAwait(false);
+            await fake.BroadcastAsync(new JsonObject {
+                ["Event"] = "Calibrating", ["Timestamp"] = 0.0, ["Host"] = "fake", ["Inst"] = 1, ["dir"] = "West", ["step"] = 2, ["dist"] = 2.0, ["dx"] = -2.0, ["dy"] = 0.2,
+            }).ConfigureAwait(false);
+            Assert.That(await WaitUntilAsync(() => guider.CalibrationRun.Steps.Count == 2).ConfigureAwait(false), Is.True, "precondition");
+            var view = await new GuiderLiveService(svc, new NoFrames()).GetCalibrationAsync(CancellationToken.None).ConfigureAwait(false);
+            Assert.That(view.Steps.Select(s => s.Step), Is.EqualTo(OnlyStepTwo), "the step the guider sent no offset for is not drawn at the origin");
+        }
+
+        [Test]
+        public async Task A_calibration_run_cut_by_a_link_drop_ends_failed() {
+            var (fake, svc) = await ConnectedAsync().ConfigureAwait(false);
+            await using var _ = fake;
+            using var __ = svc;
+            var guider = svc.ConnectedGuiderOrNull()!;
+            await fake.BroadcastAsync(new JsonObject { ["Event"] = "StartCalibration", ["Timestamp"] = 0.0, ["Host"] = "fake", ["Inst"] = 1 }).ConfigureAwait(false);
+            await fake.BroadcastAsync(new JsonObject {
+                ["Event"] = "Calibrating", ["Timestamp"] = 0.0, ["Host"] = "fake", ["Inst"] = 1,
+                ["dir"] = "West", ["step"] = 4, ["dist"] = 5.2, ["dx"] = -5.0, ["dy"] = -1.1,
+            }).ConfigureAwait(false);
+            Assert.That(await WaitUntilAsync(() => guider.CalibrationRun.Steps.Count == 1).ConfigureAwait(false), Is.True, "precondition: a running calibration");
+            Assert.That(guider.CalibrationRun.State, Is.EqualTo("running"));
+
+            Assert.That(fake.DropConnections(), Is.GreaterThan(0));
+            Assert.That(await WaitUntilAsync(() => guider.CalibrationRun.State != "running").ConfigureAwait(false), Is.True,
+                "the guider sends no CalibrationFailed when the link drops");
+            Assert.That(guider.CalibrationRun.State, Is.EqualTo("failed"));
+            Assert.That(guider.CalibrationRun.Error, Does.Contain("connection lost"));
+            Assert.That(guider.CalibrationRun.Steps, Has.Count.EqualTo(1), "the steps stay for review");
+        }
+
+        [Test]
+        [NonParallelizable] // Notifier.Use is process-global
+        public async Task A_refused_calibration_read_raises_no_notification() {
+            var (fake, svc) = await ConnectedAsync(f =>
+                f.OnRpc("get_calibration_data", _ => throw new InvalidOperationException("mount not defined (calibration view)"))).ConfigureAwait(false);
+            await using var _ = fake;
+            using var __ = svc;
+            var sink = new RecordingSink();
+            var previous = OpenAstroAra.Core.Utility.Notification.Notifier.Current;
+            OpenAstroAra.Core.Utility.Notification.Notifier.Use(sink);
+            try {
+                var view = await new GuiderLiveService(svc, new NoFrames()).GetCalibrationAsync(CancellationToken.None).ConfigureAwait(false);
+                Assert.That(view.Data, Is.Null);
+                Assert.That(view.Verdict, Is.EqualTo("redo"));
+                Assert.That(sink.Messages.Where(m => m.Contains("(calibration view)", StringComparison.Ordinal)), Is.Empty,
+                    "the dialog polls this every second: a refusal must not post an inbox Error");
+            } finally {
+                OpenAstroAra.Core.Utility.Notification.Notifier.Use(previous);
+            }
+        }
+
+        [Test]
         public async Task A_refused_read_leaves_its_field_null_and_the_rest_answers() {
             var (fake, svc) = await ConnectedAsync(f => {
                 LiveRpcs(f);

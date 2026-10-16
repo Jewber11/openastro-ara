@@ -96,6 +96,9 @@ namespace OpenAstroAra.Equipment.Equipment.MyGuider.PHD2 {
         }
 
         private PhdEventCalibrating? _calibration;
+        private readonly List<PhdEventCalibrating> _calibrationSteps = [];
+        private string _calibrationRunState = "none";
+        private string? _calibrationError;
 
         /// <summary>The latest calibration step while the guider calibrates (direction, step, distance);
         /// null otherwise. What the Live tab shows instead of a bare "calibrating".</summary>
@@ -109,6 +112,70 @@ namespace OpenAstroAra.Equipment.Equipment.MyGuider.PHD2 {
                 lock (lockobj) {
                     _calibration = value;
                 }
+            }
+        }
+
+        /// <summary>#1364 — this session's calibration run: every step the guider reported (the plot PHD2
+        /// draws), whether it is <c>none</c> | <c>running</c> | <c>complete</c> | <c>failed</c>, and the
+        /// failure reason. Kept after completion so the result can be reviewed; cleared when the next
+        /// calibration starts.</summary>
+        public (string State, IReadOnlyList<PhdEventCalibrating> Steps, string? Error) CalibrationRun {
+            get {
+                lock (lockobj) {
+                    return (_calibrationRunState, _calibrationSteps.ToArray(), _calibrationError);
+                }
+            }
+        }
+
+        private void BeginCalibrationRun() {
+            lock (lockobj) {
+                _calibrationSteps.Clear();
+                _calibrationRunState = "running";
+                _calibrationError = null;
+            }
+        }
+
+        private void RecordCalibrationStep(PhdEventCalibrating? step) {
+            if (step is null) {
+                return;
+            }
+            lock (lockobj) {
+                if (_calibrationRunState != "running") {
+                    // A step without a StartCalibration event (daemon connected mid-calibration).
+                    _calibrationSteps.Clear();
+                    _calibrationRunState = "running";
+                    _calibrationError = null;
+                }
+                _calibrationSteps.Add(step);
+            }
+        }
+
+        /// <summary>A run still in progress ends as failed with <paramref name="reason"/>: the guider
+        /// sends no CalibrationFailed when the loop is stopped, guiding stops or the link drops mid-run,
+        /// so without this the run would read "running" for the rest of the session.</summary>
+        private void AbandonCalibrationRun(string reason) {
+            lock (lockobj) {
+                if (_calibrationRunState == "running") {
+                    _calibrationRunState = "failed";
+                    _calibrationError = reason;
+                }
+            }
+        }
+
+        /// <summary>After a successful clear there is no calibration to show the run of: the plot and the
+        /// verdict start over together.</summary>
+        private void ResetCalibrationRun() {
+            lock (lockobj) {
+                _calibrationSteps.Clear();
+                _calibrationRunState = "none";
+                _calibrationError = null;
+            }
+        }
+
+        private void EndCalibrationRun(string state, string? error) {
+            lock (lockobj) {
+                _calibrationRunState = state;
+                _calibrationError = error;
             }
         }
 
@@ -1185,6 +1252,7 @@ namespace OpenAstroAra.Equipment.Equipment.MyGuider.PHD2 {
                 case "StartCalibration": {
                         AppState = new PhdEventAppState() { State = "Calibrating" };
                         Calibration = null;
+                        BeginCalibrationRun();
                         RaiseMarker(new PhdGuiderMarkerEventArgs { Kind = "calibration_started" });
                         break;
                     }
@@ -1193,11 +1261,13 @@ namespace OpenAstroAra.Equipment.Equipment.MyGuider.PHD2 {
                         // guider's own page only says "guiding" (2026-10-16).
                         var step = message.ToObject<PhdEventCalibrating>();
                         Calibration = step;
+                        RecordCalibrationStep(step);
                         if (AppState?.State != "Calibrating") {
                             AppState = new PhdEventAppState() { State = "Calibrating" };
                         }
                         RaiseMarker(new PhdGuiderMarkerEventArgs {
                             Kind = "calibrating", Direction = step?.Direction, Distance = step?.Distance, Frame = step?.Step,
+                            Dx = step?.Dx, Dy = step?.Dy,
                         });
                         break;
                     }
@@ -1209,20 +1279,25 @@ namespace OpenAstroAra.Equipment.Equipment.MyGuider.PHD2 {
                         AppState = new PhdEventAppState() { State = "Stopped" };
                         // A calibration abandoned by stopping the loop sends no CalibrationFailed.
                         Calibration = null;
+                        AbandonCalibrationRun("stopped before calibration finished");
                         break;
                     }
                 case "CalibrationComplete": {
                         Calibration = null;
+                        EndCalibrationRun("complete", null);
                         RaiseMarker(new PhdGuiderMarkerEventArgs { Kind = "calibration_complete" });
                         break;
                     }
                 case "CalibrationFailed": {
                         Calibration = null;
-                        RaiseMarker(new PhdGuiderMarkerEventArgs { Kind = "calibration_failed", Error = message["Reason"]?.ToString() });
+                        var reason = message["Reason"]?.ToString();
+                        EndCalibrationRun("failed", reason);
+                        RaiseMarker(new PhdGuiderMarkerEventArgs { Kind = "calibration_failed", Error = reason });
                         break;
                     }
                 case "GuidingStopped": {
                         Calibration = null;
+                        AbandonCalibrationRun("stopped before calibration finished");
                         RaiseMarker(new PhdGuiderMarkerEventArgs { Kind = "guiding_stopped" });
                         break;
                     }
@@ -1455,6 +1530,7 @@ namespace OpenAstroAra.Equipment.Equipment.MyGuider.PHD2 {
                 Settling = false;
                 // A calibration in progress when the link dropped is over as far as this client knows.
                 Calibration = null;
+                AbandonCalibrationRun("guider connection lost during calibration");
                 AppState = new PhdEventAppState() { State = "" };
                 PixelScale = 0.0d;
                 Connected = false;
