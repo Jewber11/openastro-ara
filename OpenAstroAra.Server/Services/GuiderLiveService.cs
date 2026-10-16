@@ -40,6 +40,8 @@ public interface IGuiderLiveService {
     Task<GuiderCalibrationViewDto> GetCalibrationAsync(CancellationToken ct);
     /// <summary>Drop the stored calibration so the next guide start calibrates again.</summary>
     Task ClearCalibrationAsync(CancellationToken ct);
+    /// <summary>#1364 item 3 — the guider's current settings and its algorithm names per axis.</summary>
+    Task<GuiderAdvancedViewDto> GetAdvancedAsync(CancellationToken ct);
 }
 
 /// <summary>
@@ -195,6 +197,27 @@ public sealed partial class GuiderLiveService : IGuiderLiveService {
     }
 
     public Task ClearCalibrationAsync(CancellationToken ct) => _guider.RequireConnectedGuider().ClearCalibrationAsync(ct);
+
+    public async Task<GuiderAdvancedViewDto> GetAdvancedAsync(CancellationToken ct) {
+        var guider = _guider.ConnectedGuiderOrNull();
+        if (guider is null) {
+            return new GuiderAdvancedViewDto(false, new GuiderAdvancedSettingsDto(), Array.Empty<string>(), Array.Empty<string>());
+        }
+        // All three at once: the read-back's thirteen getters already run in parallel, and the two
+        // algorithm lists must not add two more timeouts after them on a slow guider.
+        var currentT = Quietly<GuiderAdvancedSettings?>(async () => await guider.ReadAdvancedSettingsAsync(ct).ConfigureAwait(false), "advanced settings");
+        var raT = Quietly<IReadOnlyList<string>?>(async () => await guider.GetAlgorithmsAsync("ra", ct).ConfigureAwait(false), "RA algorithms");
+        var decT = Quietly<IReadOnlyList<string>?>(async () => await guider.GetAlgorithmsAsync("dec", ct).ConfigureAwait(false), "Dec algorithms");
+        await Task.WhenAll(currentT, raT, decT).ConfigureAwait(false);
+        var current = await currentT.ConfigureAwait(false);
+        var ra = await raT.ConfigureAwait(false);
+        var dec = await decT.ConfigureAwait(false);
+        return new GuiderAdvancedViewDto(
+            true,
+            current is null ? new GuiderAdvancedSettingsDto() : GuiderAdvancedSettingsMapping.ToDto(current),
+            ra ?? Array.Empty<string>(),
+            dec ?? Array.Empty<string>());
+    }
 
     /// <summary>The stored calibration with its orthogonality error: how far the RA and Dec axes are
     /// from 90° apart on the camera. Pure.</summary>
