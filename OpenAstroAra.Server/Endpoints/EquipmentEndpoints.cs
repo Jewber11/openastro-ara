@@ -50,6 +50,12 @@ public static partial class EquipmentEndpoints {
         }
     }
 
+    /// <summary>#1364 item 5 — <c>GET /equipment/guider/history</c>: the guider's recent guide steps,
+    /// default 400 points. The query name is the contract's snake-case <c>max_points</c>: without the
+    /// explicit name minimal APIs bind only <c>?maxPoints=</c> and the documented one was ignored.</summary>
+    internal static async Task<IResult> GetGuiderHistoryAsync([FromQuery(Name = "max_points")] int? maxPoints, IGuiderLiveService live, CancellationToken ct) =>
+        Results.Ok(await live.GetHistoryAsync(maxPoints ?? 400, ct));
+
     /// <summary>POST /equipment/filterwheel/change. Out of range is the caller's mistake (400);
     /// not connected, or a manual wheel with no filters, is a state conflict (409). Both used to
     /// surface as 500. A disposed service is the daemon shutting down and stays a 5xx.</summary>
@@ -538,6 +544,11 @@ public static partial class EquipmentEndpoints {
         guider.MapPost("/live/calibration/clear", (IGuiderLiveService live, CancellationToken ct) => GuiderLiveActionAsync(() => live.ClearCalibrationAsync(ct)))
             .Produces(StatusCodes.Status204NoContent).ProducesProblem(StatusCodes.Status409Conflict).ProducesProblem(StatusCodes.Status422UnprocessableEntity)
             .WithName("ClearGuiderCalibration").WithSummary("Drop the stored calibration; the next guide start calibrates again.");
+        // #1364 item 5 — the guider's recent guide steps for a client that connects mid-session.
+        guider.MapGet("/history", GetGuiderHistoryAsync)
+            .Produces<GuiderHistoryDto>(StatusCodes.Status200OK)
+            .WithName("GetGuiderHistory")
+            .WithSummary("The guider's recent guide steps (oldest first, with ages) — max_points 1..400, default 400.");
         // #1364 item 3 — the guider's current settings beside the profile's guider-advanced block.
         guider.MapGet("/advanced", async (IGuiderLiveService live, CancellationToken ct) => Results.Ok(await live.GetAdvancedAsync(ct)))
             .Produces<GuiderAdvancedViewDto>(StatusCodes.Status200OK)
