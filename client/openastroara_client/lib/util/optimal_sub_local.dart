@@ -13,7 +13,8 @@ import 'star_model.dart' as star_model;
 /// merge semantics as the daemon's `OptimalSubOverrides`, sourced from the
 /// live (or offline-seeded) settings notifiers instead of the profile store:
 ///
-/// - Filter passband: the named planning filter (case-insensitive) → its
+/// - Filter passband: the named planning filter (case-insensitive, with common
+///   aliases such as Hα/Ha and L/Luminance) → its
 ///   bandwidth or kind default; unknown name fails with the SAME actionable
 ///   message the daemon used; no name → broadband default, tagged assumed.
 /// - Electronics: profile value → Tier-0 default, tagged assumed.
@@ -39,6 +40,31 @@ class LocalOptimalSubSuccess extends LocalOptimalSubOutcome {
 
 const double _maxReducerFactor = 10.0; // TonightSkyOverrides.MaxReducerFactor
 
+// Only known whole-name aliases qualify. Do not guess a kind from arbitrary
+// labels: that could silently use another filter's bandwidth.
+String? _filterAlias(String name) => switch (name.trim().toLowerCase()) {
+  'l' || 'luminance' => 'l',
+  'r' || 'red' => 'r',
+  'g' || 'green' => 'g',
+  'b' || 'blue' => 'b',
+  'ha' || 'hα' || 'halpha' || 'h-alpha' || 'h alpha' => 'ha',
+  _ => null,
+};
+
+PlanningFilter? _findFilter(FilterSetSettings filterSet, String name) {
+  final exact = filterSet.filters
+      .where((f) => f.name.trim().toLowerCase() == name.toLowerCase())
+      .firstOrNull;
+  if (exact != null) return exact;
+  final alias = _filterAlias(name);
+  if (alias == null) return null;
+  final matches = filterSet.filters
+      .where((f) => _filterAlias(f.name) == alias)
+      .toList();
+  // Multiple physical filters may share an alias; require an exact name then.
+  return matches.length == 1 ? matches.single : null;
+}
+
 LocalOptimalSubOutcome resolveOptimalSubLocal({
   required OpticsSettings optics,
   required CameraElectronics electronics,
@@ -60,9 +86,7 @@ LocalOptimalSubOutcome resolveOptimalSubLocal({
   var k = 1.0;
   final name = filterName?.trim();
   if (name != null && name.isNotEmpty) {
-    final match = filterSet.filters
-        .where((f) => f.name.trim().toLowerCase() == name.toLowerCase())
-        .firstOrNull;
+    final match = _findFilter(filterSet, name);
     if (match == null) {
       final known = filterSet.filters.isNotEmpty
           ? filterSet.filters.map((f) => "'${f.name}'").join(', ')

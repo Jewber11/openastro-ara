@@ -28,6 +28,79 @@ void main() {
     ],
   );
 
+  LocalOptimalSubOutcome resolve(String name, FilterSetSettings filterSet) =>
+      resolveOptimalSubLocal(
+        optics: optics,
+        electronics: electronics,
+        site: site,
+        filterSet: filterSet,
+        filterName: name,
+        skyCalibrationK: const {'ha': 0.5, 'l': 0.8},
+      );
+
+  for (final names in [
+    ('Ha', 'Hα', FilterKind.ha, 4.0),
+    ('Hα', 'Ha', FilterKind.ha, 4.0),
+    ('Ha', 'H-alpha', FilterKind.ha, 4.0),
+    ('Luminance', 'L', FilterKind.l, 0.0),
+    ('L', 'Luminance', FilterKind.l, 80.0),
+    ('Red', 'R', FilterKind.r, 80.0),
+    ('Green', 'G', FilterKind.g, 80.0),
+    ('Blue', 'B', FilterKind.b, 80.0),
+  ]) {
+    test(
+      '${names.$2} resolves configured ${names.$1} passband and calibration',
+      () {
+        final set = FilterSetSettings(
+          filters: [
+            PlanningFilter(
+              name: names.$1,
+              kind: names.$3,
+              bandwidthNm: names.$4,
+            ),
+          ],
+        );
+        final exact = (resolve(names.$1, set) as LocalOptimalSubSuccess).result;
+        final alias = (resolve(
+          ' ${names.$2.toUpperCase()} ',
+          set,
+        ) as LocalOptimalSubSuccess).result;
+        expect(alias.skyFluxEPerSecPerPx, exact.skyFluxEPerSecPerPx);
+        expect(alias.recommendedSec, exact.recommendedSec);
+        expect(alias.assumedDefaults, isNull);
+      },
+    );
+  }
+
+  test('exact names win when multiple filters share an alias', () {
+    const set = FilterSetSettings(
+      filters: [
+        PlanningFilter(name: 'Hα', kind: FilterKind.ha, bandwidthNm: 7),
+        PlanningFilter(name: 'Ha', kind: FilterKind.ha, bandwidthNm: 4),
+      ],
+    );
+    final result = (resolve(' ha ', set) as LocalOptimalSubSuccess).result;
+    final expected = (resolve(
+      'Ha',
+      const FilterSetSettings(
+        filters: [
+          PlanningFilter(name: 'Ha', kind: FilterKind.ha, bandwidthNm: 4),
+        ],
+      ),
+    ) as LocalOptimalSubSuccess).result;
+    expect(result.skyFluxEPerSecPerPx, expected.skyFluxEPerSecPerPx);
+    expect(resolve('H-alpha', set), isA<LocalOptimalSubUnavailable>());
+  });
+
+  test('unknown labels do not inherit a configured filter kind', () {
+    expect(resolve('Chandra', filters), isA<LocalOptimalSubUnavailable>());
+    expect(resolve('Ha 3nm', filters), isA<LocalOptimalSubUnavailable>());
+    expect(
+      resolve('Hα', const FilterSetSettings()),
+      isA<LocalOptimalSubUnavailable>(),
+    );
+  });
+
   test(
     "#1140 P2 the matched filter's calibration k reaches the sky flux (dimmer sky = longer sub)",
     () {

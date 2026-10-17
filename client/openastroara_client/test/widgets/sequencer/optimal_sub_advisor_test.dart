@@ -428,10 +428,25 @@ void main() {
       expect(find.textContaining('stars/sub'), findsNothing);
     });
 
+    for (final name in ['Hα', 'L']) {
+      testWidgets('$name matches the configured planning filter alias',
+          (tester) async {
+        await pumpAdvisor(tester,
+            filterName: name,
+            filterSet: const FilterSetSettings(filters: [
+              PlanningFilter(name: 'Ha', kind: FilterKind.ha, bandwidthNm: 4),
+              PlanningFilter(name: 'Luminance', kind: FilterKind.l),
+            ]));
+        expect(find.textContaining('Unknown filter'), findsNothing);
+        expect(find.textContaining('Suggested exposure:'), findsOneWidget);
+        expect(find.text('Apply'), findsOneWidget);
+      });
+    }
+
     testWidgets('an unknown filter shows the actionable detail quietly',
         (tester) async {
-      await pumpAdvisor(tester, filterName: 'H-alpha');
-      expect(find.textContaining("Unknown filter 'H-alpha'"), findsOneWidget);
+      await pumpAdvisor(tester, filterName: 'UV');
+      expect(find.textContaining("Unknown filter 'UV'"), findsOneWidget);
       expect(find.text('Open filter set'), findsOneWidget);
       expect(find.text('Apply'), findsNothing);
     });
