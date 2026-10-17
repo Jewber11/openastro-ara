@@ -246,6 +246,20 @@ void main() {
     await _teardownPanel(tester, container);
   });
 
+  testWidgets('a strip opened while the guider settles waits for frames, not "Not guiding" (#1364)',
+      (tester) async {
+    final container = await _pump(tester,
+        status: const GuiderStatus(
+          name: 'OpenAstro Guider',
+          connectionState: GuiderConnectionState.connected,
+          runtimeState: GuiderRuntimeState.settling,
+        ));
+    expect(find.text('settling'), findsOneWidget);
+    expect(find.text('Waiting for guide frames…'), findsOneWidget,
+        reason: 'a post-dither settle is still guiding');
+    await _teardownPanel(tester, container);
+  });
+
   testWidgets('pixel-only steps plot and read in px until a scale is known, '
       'then in arcsec from the guide train', (tester) async {
     final ws = StreamController<WsEvent>.broadcast();
@@ -814,6 +828,27 @@ void main() {
     expect(applyButton(tester).onPressed, isNull);
 
     await _teardownPanel(tester, container);
+  });
+
+  test('the strip labels every guider phase in the shared wording, lower case (#1364)', () {
+    GuiderStatus st(GuiderRuntimeState r, {Map<String, dynamic>? cal}) => cal == null
+        ? GuiderStatus(name: 'G', connectionState: GuiderConnectionState.connected, runtimeState: r)
+        : GuiderStatus.fromJson(<String, dynamic>{'state': 'connected', 'runtime': cal});
+    expect(GuidingStrip.stateLabel(st(GuiderRuntimeState.looping)), 'looping');
+    expect(GuidingStrip.stateLabel(st(GuiderRuntimeState.starSelected)), 'star selected');
+    expect(GuidingStrip.stateLabel(st(GuiderRuntimeState.settling)), 'settling');
+    expect(GuidingStrip.stateLabel(st(GuiderRuntimeState.starLost)), 'star lost');
+    expect(GuidingStrip.stateLabel(st(GuiderRuntimeState.unknown)), 'connected', reason: 'not yet polled');
+    expect(GuidingStrip.stateLabel(null), 'disconnected');
+    expect(
+      GuidingStrip.stateLabel(st(GuiderRuntimeState.calibrating, cal: {
+        'state': 'calibrating', 'calibration_direction': 'East', 'calibration_step': 4, 'calibration_distance_px': 6.0,
+      })),
+      'calibrating · East step 4 · 6.0 px',
+    );
+    for (final r in GuiderRuntimeState.values.where((r) => r != GuiderRuntimeState.unknown)) {
+      expect(GuidingStrip.stateLabel(st(r)), guiderRuntimeText(r).toLowerCase(), reason: '$r drifts from the shared wording');
+    }
   });
 
   group('#1311 PA residual chip', () {
